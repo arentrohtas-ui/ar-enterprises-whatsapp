@@ -1,203 +1,412 @@
-const express = require("express");
-const opdFlow = require("./opdBooking");
+const doctorCache = new Map();
 
-const app = express();
-app.use(express.json());
-
-const PORT = process.env.PORT || 10000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
-const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
-const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
-const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
-const DEFAULT_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
-
-// वैकल्पिक: Render Env में TENANTS_JSON डालने पर बिना कोड बदले नए क्लाइंट जुड़ेंगे
-let ENV_TENANTS = {};
-if (process.env.TENANTS_JSON) {
-  try {
-    ENV_TENANTS = JSON.parse(process.env.TENANTS_JSON);
-  } catch (e) {
-    console.error("Invalid TENANTS_JSON:", e.message);
-  }
+function getNowMin(tz = "Asia/Kolkata") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const map = {};
+  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
+  return Number(map.hour || 0) * 60 + Number(map.minute || 0);
 }
 
-// वैकल्पिक प्लग-इन लोडर ताकि फ़ाइल न बनी हो तब भी सर्वर क्रैश न करे
-function safeRequire(modulePath) {
-  try {
-    return require(modulePath);
-  } catch (e) {
-    return null;
-  }
-}
+function getThreeDaySlots(tz = "Asia/Kolkata") {
+  const now = new Date();
+  const nowMin = getNowMin(tz);
 
-const gymFlow = safeRequire("./gymFlow");
-const coachingFlow = safeRequire("./coachingFlow");
-const schoolFlow = safeRequire("./schoolFlow");
-
-// चारों बिज़नेस सेक्टर पहले से रजिस्टर्ड
-const SECTOR_FLOWS = {
-  opd: opdFlow,
-  gym: gymFlow || opdFlow,
-  coaching: coachingFlow || opdFlow,
-  school: schoolFlow || opdFlow,
-};
-
-// हर क्लाइंट (Phone Number ID) की अपनी अलग Sheet ID और Sector
-const TENANTS = {
-  ...(DEFAULT_PHONE_ID
-    ? {
-        [DEFAULT_PHONE_ID]: {
-          id: "client_01",
-          name: "AR Enterprises",
-          sector: "opd",
-          token: DEFAULT_TOKEN,
-          sheetId: DEFAULT_SHEET_ID,
-        },
-      }
-    : {}),
-  ...ENV_TENANTS,
-};
-
-const sessions = new Map();
-const seenMsgs = new Set();
-
-const getTenant = (phoneId) => {
-  const fromMap = (phoneId && TENANTS[phoneId]) || null;
-  if (fromMap) return { phoneId, ...fromMap };
-  return {
-    phoneId,
-    id: phoneId || "default",
-    name: "AR Enterprises",
-    sector: "opd",
-    token: DEFAULT_TOKEN,
-    sheetId: DEFAULT_SHEET_ID,
+  const fmt = (offset) => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).formatToParts(new Date(now.getTime() + offset * 86400000));
+    const m = {};
+    for (const p of parts) if (p.type !== "literal") m[p.type] = p.value;
+    return `${m.day}-${m.month}-${m.year}`;
   };
-};
 
-const getSession = (key) => sessions.get(key) || { lang: "hi", step: null, data: {} };
-const setSession = (key, patch) => sessions.set(key, { ...getSession(key), ...patch });
+  const startOffset = nowMin >= 1200 ? 1 : 0;
 
-async function sendWA(tenant, to, payload) {
-  if (!tenant.token || !tenant.phoneId) return;
-  await fetch(`https://graph.facebook.com/v27.0/${tenant.phoneId}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${tenant.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, ...payload }),
-  }).catch((e) => console.error("WA error:", e.message));
+  return [0, 1, 2].map((i) => {
+    const offset = startOffset + i;
+    const date = fmt(offset);
+    const isToday = offset === 0;
+    return {
+      id: `day_${i}`,
+      date,
+      isToday,
+      labelHi: isToday ? `${date} (आज)` : date,
+      labelEn: isToday ? `${date} (Today)` : date,
+    };
+  });
 }
 
-const sendText = (tenant, to, body) =>
-  sendWA(tenant, to, { type: "text", text: { preview_url: false, body } });
+function getTwoHourBatches(rawBatches, isToday, tz = "Asia/Kolkata") {
+  const list = String(
+    rawBatches || "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00"
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-const sendLangMenu = (tenant, to) =>
-  sendWA(tenant, to, {
+  if (!isToday) return list;
+  const nowMin = getNowMin(tz);
+
+  return list.filter((slot) => {
+    const end = slot.split("-")[1]?.trim();
+    if (!end) return true;
+    const [h, m] = end.split(":").map(Number);
+    return nowMin < h * 60 + (m || 0);
+  });
+}
+
+async function syncDoctors(ctx, force = false) {
+  const key = `${ctx.tenant.phoneId}:${ctx.tenant.sheetId || "default"}`;
+  const cached = doctorCache.get(key);
+  if (!force && cached && Date.now() < cached.expiresAt) return cached.list;
+
+  const fallback = [
+    {
+      doctorId: "DR-1",
+      doctorName: "Dr. R. K. Sharma",
+      specialty: "General Physician",
+      opdFee: 500,
+      advanceFee: 100,
+      batches: "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00",
+      weekSchedule: "Mon-Sat Open | Sun Holiday",
+    },
+  ];
+
+  const data = await ctx.getSheet({ action: "get_doctors" });
+  if (data?.ok && Array.isArray(data.doctors) && data.doctors.length) {
+    doctorCache.set(key, { expiresAt: Date.now() + 2 * 60 * 1000, list: data.doctors });
+    return data.doctors;
+  }
+  return cached?.list || fallback;
+}
+
+async function sendHomeMenu(ctx, lang) {
+  const isEn = lang === "en";
+  return ctx.sendWA({
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: `✨ *${tenant.name}*\nनमस्ते / Hello! भाषा चुनें / Choose language:` },
+      body: {
+        text: isEn
+          ? `🏥 *${ctx.tenant.name}*\nSelect a service:`
+          : `🏥 *${ctx.tenant.name}*\nकृपया सेवा चुनें:`,
+      },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
-          { type: "reply", reply: { id: "lang_en", title: "English" } },
+          { type: "reply", reply: { id: "opd_book", title: "OPD Booking" } },
+          { type: "reply", reply: { id: "opd_status", title: "Live Status" } },
+          { type: "reply", reply: { id: "opd_timing", title: "Dr Timing" } },
         ],
       },
     },
   });
-
-function buildContext(tenant, from, sKey) {
-  return {
-    tenant,
-    from,
-    sheetUrl: SHEET_URL,
-    getSession: () => getSession(sKey),
-    setSession: (patch) => setSession(sKey, patch),
-    sendWA: (payload) => sendWA(tenant, from, payload),
-    sendText: (body) => sendText(tenant, from, body),
-    sendLangMenu: () => sendLangMenu(tenant, from),
-    postSheet: async (payload) => {
-      if (!SHEET_URL) return null;
-      const res = await fetch(SHEET_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...(tenant.sheetId ? { spreadsheetId: tenant.sheetId } : {}),
-          phoneNumberId: tenant.phoneId,
-          clientName: tenant.name,
-          sector: tenant.sector,
-          ...payload,
-        }),
-      });
-      return res.json().catch(() => null);
-    },
-    getSheet: async (params = {}) => {
-      if (!SHEET_URL) return null;
-      const qs = new URLSearchParams({
-        phone_number_id: tenant.phoneId || "",
-        ...(tenant.sheetId ? { spreadsheet_id: tenant.sheetId } : {}),
-        ...params,
-      });
-      const res = await fetch(`${SHEET_URL}?${qs.toString()}`);
-      return res.json().catch(() => null);
-    },
-  };
 }
 
-app.get("/", (_, res) => res.send("AR Enterprises Multi-Sector Core Ready"));
+async function sendDoctorList(ctx, lang, doctors) {
+  const isEn = lang === "en";
+  return ctx.sendWA({
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: isEn ? "Select Doctor" : "डॉक्टर चुनें" },
+      body: {
+        text: isEn ? "Choose a doctor for OPD booking:" : "OPD बुकिंग के लिए डॉक्टर चुनें:",
+      },
+      action: {
+        button: isEn ? "Doctors" : "डॉक्टर सूची",
+        sections: [
+          {
+            title: isEn ? "Available Doctors" : "उपलब्ध डॉक्टर",
+            rows: doctors.slice(0, 10).map((d) => ({
+              id: `doc_${d.doctorId}`,
+              title: String(d.doctorName).slice(0, 24),
+              description: `₹${d.opdFee} | Adv ₹${d.advanceFee} | ${d.specialty}`.slice(0, 72),
+            })),
+          },
+        ],
+      },
+    },
+  });
+}
 
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    return res.status(200).send(req.query["hub.challenge"]);
+async function sendDayButtons(ctx, lang, doc, days) {
+  const isEn = lang === "en";
+  return ctx.sendWA({
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: isEn
+          ? `👨‍⚕️ *${doc.doctorName}* (Fee: ₹${doc.opdFee})\nSelect booking date:`
+          : `👨‍⚕️ *${doc.doctorName}* (फ़ीस: ₹${doc.opdFee})\nबुकिंग की तारीख़ चुनें:`,
+      },
+      action: {
+        buttons: days.slice(0, 3).map((d) => ({
+          type: "reply",
+          reply: { id: d.id, title: (isEn ? d.labelEn : d.labelHi).slice(0, 20) },
+        })),
+      },
+    },
+  });
+}
+
+async function sendBatchSelector(ctx, lang, doc, day, batches) {
+  const isEn = lang === "en";
+  const head = `👨‍⚕️ *${doc.doctorName}* | 📅 *${isEn ? day.labelEn : day.labelHi}*`;
+
+  if (batches.length <= 3) {
+    return ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: `${head}\n${isEn ? "Select 2-hour batch:" : "2-घंटे का बैच चुनें:"}` },
+        action: {
+          buttons: batches.map((slot, idx) => ({
+            type: "reply",
+            reply: { id: `batch_${idx}`, title: slot.slice(0, 20) },
+          })),
+        },
+      },
+    });
   }
-  res.sendStatus(403);
-});
 
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-  try {
-    const entry = req.body?.entry?.[0];
-    const value = entry?.changes?.[0]?.value;
-    const msg = value?.messages?.[0];
-    if (!msg || seenMsgs.has(msg.id)) return;
-    seenMsgs.add(msg.id);
+  return ctx.sendWA({
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: isEn ? "2-Hr Batches" : "2-घंटे के बैच" },
+      body: { text: `${head}\n${isEn ? "Choose a 2-hour batch:" : "2-घंटे का बैच चुनें:"}` },
+      action: {
+        button: isEn ? "Select Batch" : "बैच चुनें",
+        sections: [
+          {
+            title: isEn ? "Available Slots" : "उपलब्ध समय",
+            rows: batches.slice(0, 10).map((slot, idx) => ({
+              id: `batch_${idx}`,
+              title: slot.slice(0, 24),
+              description: isEn ? "2-hour OPD slot" : "2 घंटे का OPD स्लॉट",
+            })),
+          },
+        ],
+      },
+    },
+  });
+}
 
-    const tenant = getTenant(value.metadata?.phone_number_id);
-    const sKey = `${tenant.id}:${msg.from}`;
-    const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
-    const text = (msg.text?.body || btn?.title || "").trim();
-    const btnId = btn?.id || "";
-    const low = text.toLowerCase();
-    const ctx = buildContext(tenant, msg.from, sKey);
-    const flow = SECTOR_FLOWS[tenant.sector] || opdFlow;
-
-    if (["hi", "hello", "start", "lang"].includes(low) || btnId === "act_lang") {
-      setSession(sKey, { step: null, data: {} });
-      return sendLangMenu(tenant, msg.from);
-    }
-    if (btnId === "lang_hi" || low === "हिंदी") {
-      setSession(sKey, { lang: "hi", step: null, data: {} });
-      return flow.sendHomeMenu(ctx, "hi");
-    }
-    if (btnId === "lang_en" || low === "english") {
-      setSession(sKey, { lang: "en", step: null, data: {} });
-      return flow.sendHomeMenu(ctx, "en");
-    }
-
-    await flow.handleMessage(ctx, text, btnId);
-  } catch (err) {
-    console.error("Webhook error:", err.message);
+async function sendLiveStatus(ctx, lang, query = "") {
+  const isEn = lang === "en";
+  const data = await ctx.getSheet({ action: "get_live_status", query });
+  if (!data?.ok) {
+    return ctx.sendText(isEn ? "Live status unavailable right now." : "अभी लाइव स्टेटस उपलब्ध नहीं है।");
   }
-});
 
-app.post("/run-reminders", async (req, res) => {
-  try {
-    const phoneId = req.body?.phoneNumberId || DEFAULT_PHONE_ID;
-    const tenant = getTenant(phoneId);
-    const ctx = buildContext(tenant, "", `${tenant.id}:cron`);
-    const result = opdFlow.sendDueReminders ? await opdFlow.sendDueReminders(ctx) : { sent: 0 };
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+  if (query && Array.isArray(data.matched) && data.matched.length) {
+    const lines = data.matched
+      .slice(-3)
+      .map(
+        (m) =>
+          `• Token: *${m.tokenId}* (${m.patientName})\n` +
+          `  Dr: *${m.doctorName}* | ${m.visitDate} [${m.batchSlot}]\n` +
+          `  Queue: *${m.queueStatus}* | Pay: *${m.paymentStatus}*`
+      )
+      .join("\n\n");
+    return ctx.sendText(
+      (isEn ? "🔎 *Live Token Status:*\n\n" : "🔎 *लाइव टोकन स्टेटस:*\n\n") +
+        lines +
+        (isEn
+          ? `\n\n• Running Token: *${data.currentToken}* | Waiting: *${data.waitingCount}*\nType *MENU* for main menu.`
+          : `\n\n• चालू टोकन: *${data.currentToken}* | प्रतीक्षा में: *${data.waitingCount}*\nमेनू के लिए *MENU* लिखें।`)
+    );
   }
-});
 
-app.listen(PORT, () => console.log(`AR Enterprises Core running on ${PORT}`));
+  ctx.setSession({ lang, step: "STATUS_LOOKUP" });
+  return ctx.sendText(
+    isEn
+      ? `📊 *Live OPD Queue*\n• Current Token in Cabin: *${data.currentToken}*\n• Total Waiting: *${data.waitingCount}*\n\nSend your *Token ID* (e.g. OPD-1234) or *Name* to track, or type *MENU*.`
+      : `📊 *लाइव OPD कतार*\n• केबिन में चालू टोकन: *${data.currentToken}*\n• कुल प्रतीक्षा में: *${data.waitingCount}*\n\nअपना *Token ID* (जैसे OPD-1234) या *नाम* लिखकर देखें, या *MENU* लिखें।`
+  );
+}
+
+async function sendDueReminders(ctx) {
+  const data = await ctx.getSheet({ action: "get_due_reminders" });
+  const list = data?.reminders || [];
+  let sent = 0;
+
+  for (const r of list) {
+    if (!r.patientPhone) continue;
+    await fetch(`https://graph.facebook.com/v27.0/${ctx.tenant.phoneId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ctx.tenant.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: r.patientPhone,
+        type: "text",
+        text: {
+          preview_url: false,
+          body:
+            `⏰ *OPD Reminder — ${ctx.tenant.name}*\n` +
+            `• Token: *${r.tokenId}* | Name: *${r.patientName}*\n` +
+            `• Doctor: *${r.doctorName}*\n` +
+            `• Date: *${r.visitDate}* | Batch: *${r.batchSlot}*`,
+        },
+      }),
+    }).catch(() => {});
+
+    await ctx.postSheet({ action: "mark_reminder_sent", tokenId: r.tokenId });
+    sent += 1;
+  }
+  return { sent };
+}
+
+async function handleMessage(ctx, text, btnId) {
+  const s = ctx.getSession();
+  const lang = s.lang || "hi";
+  const isEn = lang === "en";
+  const low = text.toLowerCase();
+
+  if (low === "menu") {
+    ctx.setSession({ lang, step: null, data: {} });
+    return sendHomeMenu(ctx, lang);
+  }
+
+  if (low === "sync") {
+    const docs = await syncDoctors(ctx, true);
+    return ctx.sendText(isEn ? `✅ Synced ${docs.length} doctors.` : `✅ ${docs.length} डॉक्टर सिंक हो गए।`);
+  }
+
+  if (low === "remind") {
+    const out = await sendDueReminders(ctx);
+    return ctx.sendText(isEn ? `⏰ ${out.sent} reminders sent.` : `⏰ ${out.sent} रिमाइंडर भेजे गए।`);
+  }
+
+  if (btnId === "opd_status" || low.includes("status")) {
+    return sendLiveStatus(ctx, lang);
+  }
+  if (s.step === "STATUS_LOOKUP") {
+    ctx.setSession({ lang, step: null, data: {} });
+    return sendLiveStatus(ctx, lang, text);
+  }
+
+  if (btnId === "opd_timing" || low.includes("timing") || low.includes("fee")) {
+    const docs = await syncDoctors(ctx);
+    const out = docs
+      .map(
+        (d, i) =>
+          `*${i + 1}. ${d.doctorName}* (${d.specialty})\n` +
+          `• Fee: ₹${d.opdFee} | Adv: ₹${d.advanceFee}\n` +
+          `• Batches: ${d.batches}\n` +
+          `• Schedule: ${d.weekSchedule || "Mon-Sat Open | Sun Holiday"}`
+      )
+      .join("\n\n");
+    return ctx.sendText(out + (isEn ? "\n\nType *MENU*." : "\n\nमेनू के लिए *MENU* लिखें।"));
+  }
+
+  if (btnId === "opd_book" || low.includes("book")) {
+    const docs = await syncDoctors(ctx);
+    ctx.setSession({ lang, step: "PICK_DOC", data: { docs } });
+    return sendDoctorList(ctx, lang, docs);
+  }
+
+  if (s.step === "PICK_DOC" || btnId.startsWith("doc_")) {
+    const docs = s.data?.docs || (await syncDoctors(ctx));
+    const id = btnId.startsWith("doc_") ? btnId.replace("doc_", "") : "";
+    const doc = docs.find((d) => d.doctorId === id) || docs[Number(low) - 1];
+    if (!doc) return sendDoctorList(ctx, lang, docs);
+
+    const days = getThreeDaySlots();
+    ctx.setSession({ lang, step: "PICK_DAY", data: { doc, days } });
+    return sendDayButtons(ctx, lang, doc, days);
+  }
+
+  if (s.step === "PICK_DAY" || btnId.startsWith("day_")) {
+    const doc = s.data?.doc || { doctorName: "Doctor", opdFee: 0, batches: "" };
+    const days = s.data?.days || getThreeDaySlots();
+    const day = days.find((d) => d.id === btnId) || days[Number(low) - 1];
+    if (!day) return sendDayButtons(ctx, lang, doc, days);
+
+    const batches = getTwoHourBatches(doc.batches, day.isToday);
+    if (!batches.length) {
+      return ctx.sendText(
+        isEn ? "No batches left today. Type *MENU*." : "आज के लिए कोई बैच बाकी नहीं। *MENU* लिखें।"
+      );
+    }
+    ctx.setSession({ lang, step: "PICK_BATCH", data: { doc, day, batches } });
+    return sendBatchSelector(ctx, lang, doc, day, batches);
+  }
+
+  if (s.step === "PICK_BATCH" || btnId.startsWith("batch_")) {
+    const batches = s.data?.batches || getTwoHourBatches("", false);
+    const slot = btnId.startsWith("batch_")
+      ? batches[Number(btnId.replace("batch_", ""))]
+      : batches[Number(low) - 1];
+    if (!slot) return sendBatchSelector(ctx, lang, s.data?.doc, s.data?.day, batches);
+
+    ctx.setSession({ lang, step: "ASK_NAME", data: { ...s.data, slot } });
+    return ctx.sendText(
+      isEn ? `🕒 Batch: *${slot}*\nEnter *Patient Name*:` : `🕒 बैच: *${slot}*\nकृपया *मरीज़ का नाम* लिखें:`
+    );
+  }
+
+  if (s.step === "ASK_NAME") {
+    const doc = s.data?.doc || {};
+    const day = s.data?.day || {};
+    const slot = s.data?.slot || "";
+    const tokenId = `OPD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const paymentId = `PAY-${Math.floor(1000 + Math.random() * 9000)}`;
+    const payAmount = Number(doc.advanceFee || doc.opdFee || 0);
+
+    ctx.setSession({ lang, step: null, data: {} });
+
+    const rzpLink = ctx.createRazorpayLink
+      ? await ctx.createRazorpayLink({
+          amountInRupees: payAmount,
+          tokenId,
+          patientName: text,
+          phone: ctx.from,
+          description: `${ctx.tenant.name} - ${doc.doctorName} (${tokenId})`,
+        })
+      : null;
+
+    await ctx.postSheet({
+      action: "create_opd_booking",
+      createdAt: new Date().toISOString(),
+      tokenId,
+      paymentId,
+      paymentLinkId: rzpLink?.id || "",
+      patientName: text,
+      patientPhone: ctx.from,
+      doctorId: doc.doctorId || "",
+      doctorName: doc.doctorName || "",
+      visitDate: day.date || "",
+      batchSlot: slot,
+      opdFee: doc.opdFee || 0,
+      advanceFee: doc.advanceFee || 0,
+      paidAmount: 0,
+    });
+
+    const payLineEn = rzpLink?.shortUrl
+      ? `\n💳 *Pay Advance (₹${payAmount}):* ${rzpLink.shortUrl}`
+      : `\n💳 Pay ₹${payAmount} at clinic counter.`;
+    const payLineHi = rzpLink?.shortUrl
+      ? `\n💳 *एडवांस पेमेंट (₹${payAmount}) लिंक:* ${rzpLink.shortUrl}`
+      : `\n💳 ₹${payAmount} क्लिनिक काउंटर पर जमा करें।`;
+
+    return ctx.sendText(
+      isEn
+        ? `✅ *OPD Token Generated*\n• Token: *${tokenId}*\n• Name: *${text}*\n• Doctor: *${doc.doctorName}*\n• Date: *${day.date}* | Batch: *${slot}*\n• Fee: ₹${doc.opdFee} | Adv: ₹${doc.advanceFee}${payLineEn}\n\nType *STATUS* for live queue or *MENU*.`
+        : `✅ *OPD टोकन जारी*\n• टोकन ID: *${tokenId}*\n• मरीज़: *${text}*\n• डॉक्टर: *${doc.doctorName}*\n• तारीख़: *${day.date}* | बैच: *${slot}*\n• फ़ीस: ₹${doc.opdFee} | एडवांस: ₹${doc.advanceFee}${payLineHi}\n\nलाइव कतार देखने के लिए *STATUS* या *MENU* लिखें।`
+    );
+  }
+
+  return sendHomeMenu(ctx, lang);
+}
+
+module.exports = { sendHomeMenu, handleMessage, sendDueReminders };
