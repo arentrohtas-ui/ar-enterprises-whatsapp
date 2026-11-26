@@ -15,9 +15,13 @@ async function createCashfreeLink({
   description,
   spreadsheetId = "",
   businessName = "OPD Clinic",
+  cashfreeAppId = "",
+  cashfreeSecretKey = "",
 }) {
-  const appId = String(process.env.CASHFREE_APP_ID || "").trim();
-  const secretKey = String(process.env.CASHFREE_SECRET_KEY || "").trim();
+  const appId = String(cashfreeAppId || "").trim();
+  const secretKey = String(cashfreeSecretKey || "").trim();
+
+  // क्लाइंट की अपनी Cashfree API key न होने पर लिंक नहीं बनेगा (Pay at Counter)
   if (!appId || !secretKey || Number(amountInRupees || 0) <= 0) {
     return null;
   }
