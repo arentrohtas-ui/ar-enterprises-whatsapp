@@ -615,7 +615,7 @@ async function handleMessage(ctx, text, btnId = "") {
     if (!isDoctorAvailableOnDate(selectedDoctor, chosenDay.iso, days)) {
       const warnMsg = m.docUnavailableOnDate
         .replace("${docName}", selectedDoctor?.name || "Doctor")
-        .replace("${dayLabel}", chosenDay.fullLabel)
+        .replace("${dayLabel}", chosenDay.shortLabel)
         .replace("${visitDate}", chosenDay.iso);
       await ctx.sendText(warnMsg);
       return startDateSelection(ctx, lang, selectedDoctor, "booking");
@@ -718,6 +718,61 @@ async function handleMessage(ctx, text, btnId = "") {
   return sendHomeMenu(ctx, lang);
 }
 
+async function sendFollowupTemplate(ctx, phone10, params, fallbackText) {
+  const to = String(phone10 || "").replace(/\D/g, "");
+  const fullPhone = to.length === 10 ? `91${to}` : to;
+  const templateName =
+    ctx.business?.followupTemplateName || "opd_15day_followup";
+  const langCode = ctx.business?.followupTemplateLang || "hi";
+
+  if (typeof ctx.sendTemplate === "function") {
+    return ctx.sendTemplate({
+      to: fullPhone,
+      templateName,
+      langCode,
+      bodyParams: params,
+    });
+  }
+
+  const phoneId = ctx.business?.phoneId;
+  const token = ctx.business?.token;
+  if (phoneId && token && typeof fetch === "function") {
+    const res = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: fullPhone,
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: langCode },
+            components: [
+              {
+                type: "body",
+                parameters: params.map((text) => ({
+                  type: "text",
+                  text: String(text || ""),
+                })),
+              },
+            ],
+          },
+        }),
+      }
+    );
+    if (res.ok) return res.json();
+  }
+
+  if (typeof ctx.sendText === "function") {
+    return ctx.sendText(fallbackText);
+  }
+}
+
 async function sendDueReminders(ctx) {
   const res = await ctx.getSheet({ action: "get_due_15d_reminders" });
   const dueList = Array.isArray(res?.due) ? res.due : [];
@@ -727,11 +782,18 @@ async function sendDueReminders(ctx) {
     const phone = String(item.patientPhone || "").replace(/\D/g, "");
     if (phone.length < 10) continue;
     const bizName = ctx.business?.name || "OPD Clinic";
+    const visitDateClean = String(item.visitDate || "").slice(0, 10);
 
-    await ctx.sendText(
+    const fallbackText =
       `🔔 *15-Day Follow-Up Reminder — ${bizName}*\n\n` +
-        `नमस्ते *${item.patientName}*, आपकी *${item.visitDate}* (${item.doctorName}) की OPD विज़िट को *${item.daysElapsed} दिन* पूरे हो गए हैं।\n` +
-        `यदि आपको फ़ॉलो-अप चेकअप या नया टोकन चाहिए, तो *MENU* या *TOKEN* लिखें।`
+      `नमस्ते *${item.patientName}*, आपकी *${visitDateClean}* (${item.doctorName}) की OPD विज़िट को *${item.daysElapsed} दिन* पूरे हो गए हैं।\n` +
+      `यदि आपको फ़ॉलो-अप चेकअप या नया टोकन चाहिए, तो *MENU* या *TOKEN* लिखें।`;
+
+    await sendFollowupTemplate(
+      ctx,
+      phone.slice(-10),
+      [item.patientName, bizName, visitDateClean, item.doctorName],
+      fallbackText
     );
 
     await ctx.postSheet({
