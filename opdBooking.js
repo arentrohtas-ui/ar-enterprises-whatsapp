@@ -1,24 +1,3 @@
-const DEFAULT_DOCTORS = [
-  {
-    id: "DOC_1",
-    name: "Dr. R. K. Verma",
-    specialization: "General Physician",
-    days: "Mon-Sat",
-    batches: ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"],
-    opdFee: 300,
-    advanceAmount: 100,
-  },
-  {
-    id: "DOC_2",
-    name: "Dr. Neha Singh",
-    specialization: "Child & Family Care",
-    days: "Mon-Sat",
-    batches: ["11:00 AM - 01:00 PM", "06:00 PM - 08:00 PM"],
-    opdFee: 400,
-    advanceAmount: 100,
-  },
-];
-
 const MSG = {
   hi: {
     menuTitle: "OPD सेवा मेनू",
@@ -34,7 +13,7 @@ const MSG = {
     invalidPhone: "कृपया सही 10 अंकों का मोबाइल नंबर लिखें या *SELF* भेजें।",
     statusPrompt:
       "लाइव कतार देखने के लिए अपना *Token ID* या *मरीज़ का नाम* लिखें (या सिर्फ़ *ALL* भेजें):",
-    noDoctors: "अभी डॉक्टर की सूची उपलब्ध नहीं है, कृपया क्लिनिक से संपर्क करें।",
+    noDoctors: "अभी कोई डॉक्टर उपलब्ध नहीं है। कृपया क्लिनिक शीट में डॉक्टर जोड़ें।",
   },
   en: {
     menuTitle: "OPD Service Menu",
@@ -50,7 +29,7 @@ const MSG = {
     invalidPhone: "Please enter a valid 10-digit mobile number or type *SELF*.",
     statusPrompt:
       "Enter your *Token ID* or *Patient Name* to check live queue status (or type *ALL*):",
-    noDoctors: "Doctor list is not available right now. Please contact the clinic.",
+    noDoctors: "No doctors available right now. Please add doctors in the clinic sheet.",
   },
 };
 
@@ -95,13 +74,7 @@ async function loadDoctors(ctx) {
           : Number(ctx.business?.advanceAmount || 0),
     }));
   }
-  return DEFAULT_DOCTORS.map((d) => ({
-    ...d,
-    advanceAmount:
-      Number(ctx.business?.advanceAmount || 0) > 0
-        ? Number(ctx.business.advanceAmount)
-        : d.advanceAmount,
-  }));
+  return [];
 }
 
 async function sendHomeMenu(ctx, lang = "hi") {
@@ -312,13 +285,13 @@ async function finalizeBooking(ctx, lang, sessionData) {
     (lang === "en"
       ? `✅ *OPD Token Confirmed*\n` +
         `• Token ID: *${tokenId}*\n` +
-        `• Patient: *${patientName}* (${patientPhone})\n` +
+        `• Patient: *${patientName}*\n` +
         `• Doctor: *${doc.name}*\n` +
         `• Date & Batch: *${visitDate}* | *${batchSlot}*\n` +
         `• OPD Fee: ₹${opdFee} | Advance Due: ₹${advanceFee}`
       : `✅ *OPD टोकन कन्फ़र्म*\n` +
         `• टोकन ID: *${tokenId}*\n` +
-        `• मरीज़: *${patientName}* (${patientPhone})\n` +
+        `• मरीज़: *${patientName}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
         `• तारीख़ व बैच: *${visitDate}* | *${batchSlot}*\n` +
         `• OPD फ़ीस: ₹${opdFee} | एडवांस राशि: ₹${advanceFee}`);
@@ -336,7 +309,6 @@ async function finalizeBooking(ctx, lang, sessionData) {
   }
 
   await ctx.sendText(confirmText);
-  await sendHomeMenu(ctx, lang);
 }
 
 async function handleMessage(ctx, text, btnId = "") {
