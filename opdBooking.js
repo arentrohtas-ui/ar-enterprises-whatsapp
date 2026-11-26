@@ -5,7 +5,9 @@ const MSG = {
     statusBtn: "लाइव कतार देखें",
     timingBtn: "डॉक्टर टाइमिंग व फ़ीस",
     pickDoc: "कृपया डॉक्टर चुनें:",
+    pickAvailDoc: "उपलब्धता व टाइमिंग देखने के लिए कृपया डॉक्टर चुनें:",
     pickDate: "कृपया विज़िट की तारीख़ चुनें:",
+    pickAvailDate: "उपलब्धता देखने के लिए कृपया तारीख़ चुनें:",
     pickBatch: "कृपया समय का बैच चुनें:",
     askName: "कृपया मरीज़ का पूरा नाम लिखें:",
     askAge: "कृपया मरीज़ की उम्र (साल में) लिखें (जैसे 25):",
@@ -17,7 +19,7 @@ const MSG = {
       "लाइव कतार देखने के लिए अपना *Token ID* या *मरीज़ का नाम* लिखें (या सिर्फ़ *ALL* भेजें):",
     noDoctors: "अभी कोई डॉक्टर उपलब्ध नहीं है। कृपया क्लिनिक शीट में डॉक्टर जोड़ें।",
     docUnavailableOnDate:
-      "माफ़ करें, *${docName}* (${visitDate}) को उपलब्ध नहीं हैं। कृपया डॉक्टर की टाइमिंग व उपलब्धता देखें और दूसरी तारीख़ चुनें।",
+      "माफ़ करें, *${docName}* (${visitDate}) को उपलब्ध नहीं हैं। कृपया डॉक्टर की टाइमिंग देखें और दूसरी तारीख़ चुनें।",
   },
   en: {
     menuTitle: "OPD Service Menu",
@@ -25,7 +27,9 @@ const MSG = {
     statusBtn: "Live Queue Status",
     timingBtn: "Doctor Timing & Fee",
     pickDoc: "Please select a doctor:",
+    pickAvailDoc: "Please select a doctor to check availability & timing:",
     pickDate: "Please select a visit date:",
+    pickAvailDate: "Please select a date to check availability:",
     pickBatch: "Please select a time batch:",
     askName: "Please enter the patient's full name:",
     askAge: "Please enter the patient's age in years (e.g. 25):",
@@ -37,7 +41,7 @@ const MSG = {
       "Enter your *Token ID* or *Patient Name* to check live queue status (or type *ALL*):",
     noDoctors: "No doctors available right now. Please add doctors in the clinic sheet.",
     docUnavailableOnDate:
-      "Sorry, *${docName}* is not available on *${visitDate}*. Please check doctor timing & availability and choose another date.",
+      "Sorry, *${docName}* is not available on *${visitDate}*. Please check doctor timing and choose another date.",
   },
 };
 
@@ -70,11 +74,13 @@ function parseBatches(rawBatches) {
   return parts.length > 0 ? parts : ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"];
 }
 
-function isDoctorAvailableOnDate(doctor, dateIso, allowedDays) {
+function getDoctorDateAvailability(doctor, dateIso, allowedDays) {
   const isAllowedDate = Array.isArray(allowedDays)
     ? allowedDays.some((d) => d.iso === dateIso)
     : true;
-  if (!isAllowedDate) return false;
+  if (!isAllowedDate) {
+    return { isAvailable: false, code: "A", label: "Not in allowed 3-day window" };
+  }
 
   const slots = Array.isArray(doctor?.dayAvailability) ? doctor.dayAvailability : [];
   const matchedSlot = slots.find((s) => String(s.date || "").trim() === String(dateIso).trim());
@@ -82,14 +88,18 @@ function isDoctorAvailableOnDate(doctor, dateIso, allowedDays) {
   if (matchedSlot && String(matchedSlot.status || "").trim()) {
     const code = String(matchedSlot.status || "").trim().toUpperCase();
     if (["A", "ABSENT", "OFF", "NO", "UNAVAILABLE", "0"].includes(code)) {
-      return false;
+      return { isAvailable: false, code: "A", label: "Absent (A)" };
     }
     if (["P", "PRESENT", "ON", "YES", "AVAILABLE", "1"].includes(code)) {
-      return true;
+      return { isAvailable: true, code: "P", label: "Present (P)" };
     }
   }
 
-  return true;
+  return { isAvailable: true, code: "P", label: "Present (P)" };
+}
+
+function isDoctorAvailableOnDate(doctor, dateIso, allowedDays) {
+  return getDoctorDateAvailability(doctor, dateIso, allowedDays).isAvailable;
 }
 
 async function loadDoctors(ctx) {
@@ -137,15 +147,16 @@ async function sendHomeMenu(ctx, lang = "hi") {
   });
 }
 
-async function startDoctorSelection(ctx, lang) {
+async function startDoctorSelection(ctx, lang, purpose = "booking") {
   const m = MSG[lang] || MSG.hi;
   const doctors = await loadDoctors(ctx);
   if (!doctors.length) return ctx.sendText(m.noDoctors);
 
+  const stepName = purpose === "availability" ? "pick_avail_doctor" : "pick_doctor";
   ctx.setSession({
     lang,
-    step: "pick_doctor",
-    data: { doctors },
+    step: stepName,
+    data: { doctors, purpose },
   });
 
   const rows = doctors.slice(0, 10).map((doc, idx) => ({
@@ -158,7 +169,7 @@ async function startDoctorSelection(ctx, lang) {
     type: "interactive",
     interactive: {
       type: "list",
-      body: { text: m.pickDoc },
+      body: { text: purpose === "availability" ? m.pickAvailDoc : m.pickDoc },
       action: {
         button: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
         sections: [{ title: lang === "en" ? "Available Doctors" : "उपलब्ध डॉक्टर", rows }],
@@ -167,20 +178,26 @@ async function startDoctorSelection(ctx, lang) {
   });
 }
 
-async function startDateSelection(ctx, lang, selectedDoctor = null) {
+async function startDateSelection(ctx, lang, selectedDoctor = null, purpose = "booking") {
   const m = MSG[lang] || MSG.hi;
   const days = getNextThreeDays();
+  const stepName = purpose === "availability" ? "pick_avail_date" : "pick_date";
+
   ctx.setSession({
     lang,
-    step: "pick_date",
-    data: { days, selectedDoctor: selectedDoctor || ctx.getSession()?.data?.selectedDoctor },
+    step: stepName,
+    data: {
+      days,
+      purpose,
+      selectedDoctor: selectedDoctor || ctx.getSession()?.data?.selectedDoctor,
+    },
   });
 
   await ctx.sendWA({
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: m.pickDate },
+      body: { text: purpose === "availability" ? m.pickAvailDate : m.pickDate },
       action: {
         buttons: days.map((d) => ({
           type: "reply",
@@ -215,46 +232,55 @@ async function startBatchSelection(ctx, lang, doctor, visitDate = "") {
   });
 }
 
-function formatDoctorTimingLines(doctors, allowedDays = []) {
-  const allowedSet = new Set((allowedDays || []).map((d) => d.iso));
-  return doctors.map((d, i) => {
-    const availText =
-      Array.isArray(d.dayAvailability) && d.dayAvailability.length > 0
-        ? d.dayAvailability
-            .filter((slot) => slot.date && (!allowedSet.size || allowedSet.has(slot.date)))
-            .map((slot) => {
-              const code = String(slot.status || "P").trim().toUpperCase();
-              const mark = ["A", "ABSENT", "OFF", "NO", "UNAVAILABLE", "0"].includes(code)
-                ? "A (Absent)"
-                : "P (Available)";
-              return `${slot.date}: ${mark}`;
-            })
-            .join(" | ")
-        : "P (Available)";
+function formatDoctorTimingForDate(doctor, dateIso, allowedDays) {
+  const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
+  const statusLine = avail.isAvailable
+    ? (ctxLangFallback(doctor, dateIso) || `✅ *Available (${avail.code})*`)
+    : `❌ *Not Available (${avail.code})*`;
 
-    return (
-      `${i + 1}. *${d.name}* (${d.specialization})\n` +
-      `   • Days: ${d.days}\n` +
-      `   • Batches: ${parseBatches(d.batches).join(", ")}\n` +
-      `   • OPD Fee: ₹${d.opdFee} | Advance: ₹${d.advanceAmount}\n` +
-      `   • 3-Day Availability: ${availText}`
-    );
-  });
+  return (
+    `🩺 *${doctor.name}* (${doctor.specialization})\n` +
+    `• Date: *${dateIso}*\n` +
+    `• Availability: ${statusLine}\n` +
+    `• Days: ${doctor.days}\n` +
+    `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
+    `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
+  );
 }
 
-async function sendDoctorTimings(ctx, lang) {
-  const doctors = await loadDoctors(ctx);
-  if (!doctors.length) {
-    return ctx.sendText(MSG[lang]?.noDoctors || MSG.hi.noDoctors);
-  }
+function ctxLangFallback(doctor, dateIso) {
+  return `✅ *Available (P)* on *${dateIso}*`;
+}
 
-  const threeDays = getNextThreeDays();
-  const lines = formatDoctorTimingLines(doctors, threeDays);
+async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedDays) {
+  const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
+  const availText =
+    lang === "en"
+      ? avail.isAvailable
+        ? "✅ *Available (P)*"
+        : "❌ *Not Available (A)*"
+      : avail.isAvailable
+        ? "✅ *उपलब्ध (P)*"
+        : "❌ *अनुपलब्ध (A)*";
 
-  await ctx.sendText(
-    (lang === "en" ? "🩺 *Doctor Timings & Availability*\n\n" : "🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n") +
-      lines.join("\n\n")
-  );
+  const msg =
+    lang === "en"
+      ? `🩺 *Doctor Timing & Availability*\n\n` +
+        `• Doctor: *${doctor.name}* (${doctor.specialization})\n` +
+        `• Date: *${dateIso}*\n` +
+        `• Status: ${availText}\n` +
+        `• Days: ${doctor.days}\n` +
+        `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
+        `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
+      : `🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n` +
+        `• डॉक्टर: *${doctor.name}* (${doctor.specialization})\n` +
+        `• तारीख़: *${dateIso}*\n` +
+        `• उपलब्धता: ${availText}\n` +
+        `• दिन: ${doctor.days}\n` +
+        `• बैच: ${parseBatches(doctor.batches).join(", ")}\n` +
+        `• OPD फ़ीस: ₹${doctor.opdFee} | एडवांस: ₹${doctor.advanceAmount}`;
+
+  await ctx.sendText(msg);
   await sendHomeMenu(ctx, lang);
 }
 
@@ -393,7 +419,7 @@ async function handleMessage(ctx, text, btnId = "") {
   }
 
   if (btnId === "opd_book" || ["book", "token", "बुक", "टोकन"].includes(low)) {
-    return startDoctorSelection(ctx, lang);
+    return startDoctorSelection(ctx, lang, "booking");
   }
 
   if (btnId === "opd_status" || ["status", "live", "कतार", "स्टेटस"].includes(low)) {
@@ -402,7 +428,38 @@ async function handleMessage(ctx, text, btnId = "") {
   }
 
   if (btnId === "opd_timing" || ["timing", "timings", "fee", "टाइमिंग", "फ़ीस"].includes(low)) {
-    return sendDoctorTimings(ctx, lang);
+    return startDoctorSelection(ctx, lang, "availability");
+  }
+
+  if (session.step === "pick_avail_doctor") {
+    const doctors = session.data?.doctors || (await loadDoctors(ctx));
+    let selected = null;
+    if (btnId.startsWith("doc_")) {
+      const idx = Number(btnId.replace("doc_", ""));
+      selected = doctors[idx];
+    } else {
+      selected = doctors.find((d) => d.name.toLowerCase().includes(low));
+    }
+    if (!selected) return startDoctorSelection(ctx, lang, "availability");
+
+    return startDateSelection(ctx, lang, selected, "availability");
+  }
+
+  if (session.step === "pick_avail_date") {
+    const days = session.data?.days || getNextThreeDays();
+    const selectedDoctor = session.data?.selectedDoctor;
+    let chosenDate = "";
+    if (btnId.startsWith("date_")) {
+      chosenDate = btnId.replace("date_", "");
+    } else {
+      const match = days.find(
+        (d) => d.iso === low || d.label.toLowerCase().includes(low)
+      );
+      chosenDate = match ? match.iso : days[0].iso;
+    }
+
+    ctx.setSession({ lang, step: null });
+    return sendDoctorAvailabilityReport(ctx, lang, selectedDoctor, chosenDate, days);
   }
 
   if (session.step === "pick_doctor") {
@@ -414,9 +471,9 @@ async function handleMessage(ctx, text, btnId = "") {
     } else {
       selected = doctors.find((d) => d.name.toLowerCase().includes(low));
     }
-    if (!selected) return startDoctorSelection(ctx, lang);
+    if (!selected) return startDoctorSelection(ctx, lang, "booking");
 
-    return startDateSelection(ctx, lang, selected);
+    return startDateSelection(ctx, lang, selected, "booking");
   }
 
   if (session.step === "pick_date") {
@@ -436,9 +493,9 @@ async function handleMessage(ctx, text, btnId = "") {
       const warnMsg = m.docUnavailableOnDate
         .replace("${docName}", selectedDoctor?.name || "Doctor")
         .replace("${visitDate}", chosenDate);
-      const timingBlock = formatDoctorTimingLines([selectedDoctor], days).join("\n\n");
+      const timingBlock = formatDoctorTimingForDate(selectedDoctor, chosenDate, days);
       await ctx.sendText(`${warnMsg}\n\n${timingBlock}`);
-      return startDateSelection(ctx, lang, selectedDoctor);
+      return startDateSelection(ctx, lang, selectedDoctor, "booking");
     }
 
     return startBatchSelection(ctx, lang, selectedDoctor, chosenDate);
@@ -548,17 +605,4 @@ async function sendDueReminders(ctx) {
     );
 
     await ctx.postSheet({
-      action: "mark_15d_reminder_sent",
-      rowIndex: item.rowIndex,
-    });
-    sent++;
-  }
-
-  return { sent };
-}
-
-module.exports = {
-  sendHomeMenu,
-  handleMessage,
-  sendDueReminders,
-};
+      action: "mark_15d_reminder
