@@ -144,7 +144,6 @@ const sendDayButtons = (tenant, to, lang, doc, days) =>
     },
   });
 
-// 2-घंटे के बैच चुनने के लिए इंटरैक्टिव मेन्यू (3 तक हों तो बटन, 4+ हों तो लिस्ट)
 const sendBatchSelector = (tenant, to, lang, doc, day, batches) => {
   const isEn = lang === "en";
   const headerText = `${doc ? `${doc.doctorName} | ` : ""}${isEn ? day.labelEn : day.labelHi}`;
@@ -238,8 +237,8 @@ async function routeMessage(tenant, from, text, btnId) {
     return sendDayButtons(tenant, from, lang, doc, days);
   }
 
-  if (prev.step === "PICK_DAY") {
-    const doc = prev.data?.doc;
+  if (prev.step === "PICK_DAY" || (btnId && btnId.startsWith("day_"))) {
+    const doc = prev.data?.doc || { doctorName: "Doctor", batches: "" };
     const days = prev.data?.days || getThreeDaySlots();
     const day =
       days.find((d) => d.id === btnId) ||
@@ -263,8 +262,8 @@ async function routeMessage(tenant, from, text, btnId) {
     return sendBatchSelector(tenant, from, lang, doc, day, batches);
   }
 
-  if (prev.step === "PICK_BATCH") {
-    const batches = prev.data?.batches || [];
+  if (prev.step === "PICK_BATCH" || (btnId && btnId.startsWith("batch_"))) {
+    const batches = prev.data?.batches || getTwoHourBatches("", false);
     let slot = "";
     if (btnId && btnId.startsWith("batch_")) {
       slot = batches[Number(btnId.replace("batch_", ""))] || "";
