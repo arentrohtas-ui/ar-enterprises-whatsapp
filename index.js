@@ -1,217 +1,102 @@
-const express = require("express");
-const { getThreeDaySlots, getTwoHourBatches } = require("./opdBooking");
-
-const app = express();
-app.use(express.json());
-
-const PORT = process.env.PORT || 10000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
-const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
-const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
-const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
-
-const TENANTS = {
-  ...(DEFAULT_PHONE_ID
-    ? {
-        [DEFAULT_PHONE_ID]: {
-          id: "client_01",
-          name: "AR Enterprises",
-          sector: "opd",
-          token: DEFAULT_TOKEN,
-          sheetTab: "OPD_Tokens",
-        },
-      }
-    : {}),
-};
-
-const sessions = new Map();
-const seenMsgs = new Set();
-
-const getTenant = (phoneId) =>
-  TENANTS[phoneId]
-    ? { phoneId, ...TENANTS[phoneId] }
-    : {
-        phoneId,
-        id: "default",
-        name: "AR Enterprises",
-        sector: "opd",
-        token: DEFAULT_TOKEN,
-        sheetTab: "OPD_Tokens",
-      };
-
-const getSession = (key) => sessions.get(key) || { lang: "hi", step: null, data: {} };
-const setSession = (key, patch) => sessions.set(key, { ...getSession(key), ...patch });
-
-async function pushToSheet(payload) {
-  if (!SHEET_URL) return;
-  await fetch(SHEET_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch((e) => console.error("Sheet error:", e.message));
+function getNowMin(tz = "Asia/Kolkata") {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const map = {};
+  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
+  return Number(map.hour || 0) * 60 + Number(map.minute || 0);
 }
 
-async function sendWA(tenant, to, payload) {
-  if (!tenant.token || !tenant.phoneId) return;
-  await fetch(`https://graph.facebook.com/v27.0/${tenant.phoneId}/messages`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${tenant.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, ...payload }),
-  }).catch((e) => console.error("WA error:", e.message));
+// सिर्फ़ तारीख़ (DD-MM-YYYY) दिखाएगा और करेंट डेट पर साथ में (Today)/(आज) जोड़ेगा
+function getThreeDaySlots(tz = "Asia/Kolkata") {
+  const now = new Date();
+  const nowMin = getNowMin(tz);
+
+  const formatDDMMYYYY = (offset) => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).formatToParts(new Date(now.getTime() + offset * 86400000));
+    const m = {};
+    for (const p of parts) if (p.type !== "literal") m[p.type] = p.value;
+    return `${m.day}-${m.month}-${m.year}`;
+  };
+
+  // आज के स्लॉट बीतने (20:00) पर अगले 3 दिन की तारीख़ें दिखेंगी
+  const startOffset = nowMin >= 1200 ? 1 : 0;
+
+  return [0, 1, 2].map((i) => {
+    const offset = startOffset + i;
+    const dateStr = formatDDMMYYYY(offset);
+    const isToday = offset === 0;
+    return {
+      id: `day_${i}`,
+      date: dateStr,
+      isToday,
+      labelHi: isToday ? `${dateStr} (आज)` : dateStr,
+      labelEn: isToday ? `${dateStr} (Today)` : dateStr,
+    };
+  });
 }
 
-const sendText = (tenant, to, body) =>
-  sendWA(tenant, to, { type: "text", text: { preview_url: false, body } });
+function getTwoHourBatches(rawBatches, isToday, tz = "Asia/Kolkata") {
+  const list = String(
+    rawBatches || "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00"
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-const sendLangMenu = (tenant, to) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: `नमस्ते / Hello *${tenant.name}*\nभाषा चुनें / Choose language:` },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
-          { type: "reply", reply: { id: "lang_en", title: "English" } },
-        ],
-      },
-    },
+  if (!isToday) return list;
+  const nowMin = getNowMin(tz);
+
+  return list.filter((slot) => {
+    const end = slot.split("-")[1]?.trim();
+    if (!end) return true;
+    const [h, m] = end.split(":").map(Number);
+    return nowMin < h * 60 + (m || 0);
   });
+}
 
-const sendMainMenu = (tenant, to, lang) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: lang === "en" ? `*${tenant.name}* — Choose an option:` : `*${tenant.name}* — विकल्प चुनें:`,
-      },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "act_book", title: "OPD Booking" } },
-          { type: "reply", reply: { id: "act_status", title: "Live Status" } },
-          { type: "reply", reply: { id: "act_timing", title: "Dr Timing" } },
-        ],
-      },
+async function loadDoctors(sheetUrl, phoneId) {
+  const fallback = [
+    {
+      doctorId: "DR-101",
+      doctorName: "Dr. R. K. Sharma",
+      specialty: "General Physician",
+      opdFee: 500,
+      advanceFee: 100,
+      timing: "08:00 AM - 08:00 PM",
+      batches: "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00",
     },
-  });
-
-// ऑटोमैटिक 3-दिन के बटन भेजने का फंक्शन
-const sendDayButtons = (tenant, to, lang, days) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: lang === "en" ? "Select booking date:" : "बुकिंग की तारीख चुनें:",
-      },
-      action: {
-        buttons: days.slice(0, 3).map((d) => ({
-          type: "reply",
-          reply: {
-            id: d.id,
-            title: (lang === "en" ? d.labelEn : d.labelHi).slice(0, 20),
-          },
-        })),
-      },
+    {
+      doctorId: "DR-102",
+      doctorName: "Dr. Priya Verma",
+      specialty: "Child Specialist",
+      opdFee: 600,
+      advanceFee: 150,
+      timing: "10:00 AM - 08:00 PM",
+      batches: "10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00",
     },
-  });
+  ];
 
-async function routeMessage(tenant, from, text, btnId) {
-  const sKey = `${tenant.id}:${from}`;
-  const s = getSession(sKey);
-  const low = (text || "").trim().toLowerCase();
-
-  if (["hi", "hello", "start", "lang"].includes(low)) {
-    setSession(sKey, { step: null, data: {} });
-    return sendLangMenu(tenant, from);
-  }
-  if (btnId === "lang_hi") {
-    setSession(sKey, { lang: "hi", step: null });
-    return sendMainMenu(tenant, from, "hi");
-  }
-  if (btnId === "lang_en") {
-    setSession(sKey, { lang: "en", step: null });
-    return sendMainMenu(tenant, from, "en");
-  }
-  if (low === "menu") {
-    setSession(sKey, { step: null });
-    return sendMainMenu(tenant, from, s.lang);
-  }
-
-  if (btnId === "act_book" || low === "1" || low.includes("book")) {
-    const days = getThreeDaySlots();
-    setSession(sKey, { step: "PICK_DAY", data: { days } });
-    return sendDayButtons(tenant, from, s.lang, days);
-  }
-
-  if (s.step === "PICK_DAY") {
-    const days = s.data.days || getThreeDaySlots();
-    const day =
-      days.find((d) => d.id === btnId) ||
-      days[Number(low) - 1] ||
-      days.find((d) => text && (d.labelHi.includes(text) || d.labelEn.includes(text)));
-
-    if (!day) {
-      return sendDayButtons(tenant, from, s.lang, days);
+  if (!sheetUrl) return fallback;
+  try {
+    const u = `${sheetUrl}?action=get_doctors&phone_number_id=${encodeURIComponent(phoneId || "")}`;
+    const res = await fetch(u);
+    const data = await res.json();
+    if (data?.ok && Array.isArray(data.doctors) && data.doctors.length) {
+      return data.doctors;
     }
-
-    const batches = getTwoHourBatches("", day.isToday);
-    setSession(sKey, { step: "PICK_BATCH", data: { day, batches } });
-    return sendText(
-      tenant,
-      from,
-      `${s.lang === "en" ? day.labelEn : day.labelHi}\n2-Hr Batches:\n` +
-        batches.map((b, i) => `${i + 1}. ${b}`).join("\n")
-    );
+  } catch (e) {
+    console.error("Doctors load fallback:", e.message);
   }
-
-  if (s.step === "PICK_BATCH") {
-    const idx = Number(low) - 1;
-    const slot = s.data.batches?.[idx] || text;
-    const tokenId = `OPD-${Math.floor(1000 + Math.random() * 9000)}`;
-    setSession(sKey, { step: null, data: {} });
-    await pushToSheet({
-      sheetTab: tenant.sheetTab,
-      tokenId,
-      date: s.data.day?.date,
-      batch: slot,
-      phone: from,
-    });
-    return sendText(
-      tenant,
-      from,
-      `Token: *${tokenId}*\nDate: *${s.data.day?.date}*\nBatch: *${slot}*`
-    );
-  }
-
-  return sendMainMenu(tenant, from, s.lang);
+  return fallback;
 }
 
-app.get("/", (_, res) => res.send("AR Enterprises Core Ready"));
-
-app.get("/webhook", (req, res) => {
-  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
-    return res.status(200).send(req.query["hub.challenge"]);
-  }
-  res.sendStatus(403);
-});
-
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
-  const entry = req.body?.entry?.[0];
-  const change = entry?.changes?.[0];
-  const value = change?.value;
-  if (!value?.messages?.[0]) return;
-
-  const msg = value.messages[0];
-  if (seenMsgs.has(msg.id)) return;
-  seenMsgs.add(msg.id);
-
-  const tenant = getTenant(value.metadata?.phone_number_id);
-  const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
-  const text = msg.text?.body || btn?.title || "";
-  await routeMessage(tenant, msg.from, text, btn?.id || "");
-});
-
-app.listen(PORT, () => console.log(`Core running on ${PORT}`));
+module.exports = { getThreeDaySlots, getTwoHourBatches, loadDoctors };
