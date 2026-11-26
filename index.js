@@ -9,19 +9,27 @@ const DEFAULT_ACCESS_TOKEN = process.env.ACCESS_TOKEN || "";
 const DEFAULT_PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "";
 const WEBHOOK_SINK_URL = process.env.WEBHOOK_SINK_URL || "";
 
-// हर क्लाइंट के Phone Number ID के अनुसार कॉन्फ़िगरेशन
+// हर क्लाइंट के Phone Number ID के हिसाब से अलग बिज़नेस सेटिंग
 const TENANTS = {
   ...(DEFAULT_PHONE_NUMBER_ID
     ? {
         [DEFAULT_PHONE_NUMBER_ID]: {
-          clientId: "ar_core_demo",
-          brandName: "AR Enterprises",
-          sector: "platform",
+          clientId: "city_care_opd",
+          brandName: "City Care OPD & Polyclinic",
+          sector: "opd", // "opd" | "gym" | "school" | "coaching"
           accessToken: DEFAULT_ACCESS_TOKEN,
-          sheetTab: "Clients_Master_Data",
+          upiOrPayBaseUrl: "https://ar-enterprises-whatsapp.onrender.com/pay-demo",
         },
       }
     : {}),
+  // नया क्लाइंट जोड़ने के लिए बस उसका Phone Number ID और Token नीचे जोड़ें:
+  // "987654321012345": {
+  //   clientId: "fit_zone_gym",
+  //   brandName: "FitZone Gym",
+  //   sector: "gym",
+  //   accessToken: "CLIENT_TOKEN",
+  //   upiOrPayBaseUrl: "",
+  // },
 };
 
 const processedMessageIds = new Set();
@@ -45,11 +53,11 @@ function resolveTenant(incomingPhoneNumberId) {
   }
   return {
     phoneNumberId: id,
-    clientId: id || "ar_core_demo",
+    clientId: id || "default_client",
     brandName: "AR Enterprises",
-    sector: "platform",
+    sector: "opd",
     accessToken: DEFAULT_ACCESS_TOKEN,
-    sheetTab: "Clients_Master_Data",
+    upiOrPayBaseUrl: "",
   };
 }
 
@@ -75,37 +83,46 @@ function clearSession(clientId, from) {
   userSessions.delete(`${clientId}:${from}`);
 }
 
-function makeRefId(prefix) {
+function makeId(prefix) {
   return `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
-async function saveToSheet(tenant, record) {
-  if (!WEBHOOK_SINK_URL) return;
+async function fetchDoctorsForTenant(phoneNumberId) {
+  if (!WEBHOOK_SINK_URL) return [];
+  try {
+    const url = `${WEBHOOK_SINK_URL}?action=get_doctors&phone_number_id=${encodeURIComponent(
+      phoneNumberId
+    )}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.ok && Array.isArray(json.doctors)) {
+      return json.doctors;
+    }
+  } catch (err) {
+    console.error("Error fetching doctors from Sheet:", err.message || err);
+  }
+  return [];
+}
+
+async function postToSheet(payload) {
+  if (!WEBHOOK_SINK_URL) return null;
   try {
     const res = await fetch(WEBHOOK_SINK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        clientId: tenant.clientId,
-        brandName: tenant.brandName,
-        sector: tenant.sector,
-        sheetTab: tenant.sheetTab,
-        createdAt: new Date().toISOString(),
-        ...record,
-      }),
+      body: JSON.stringify(payload),
     });
-    const out = await res.text();
-    console.log("Sheet sink response:", out);
+    const text = await res.text();
+    console.log("Sheet response:", text);
+    return text;
   } catch (err) {
-    console.error("Sheet sink error:", err.message || err);
+    console.error("Sheet POST error:", err.message || err);
+    return null;
   }
 }
 
 async function postToWhatsApp(tenant, payload) {
-  if (!tenant.accessToken || !tenant.phoneNumberId) {
-    console.error("Missing accessToken or phoneNumberId:", tenant.clientId);
-    return;
-  }
+  if (!tenant.accessToken || !tenant.phoneNumberId) return;
   try {
     const res = await fetch(
       `https://graph.facebook.com/v27.0/${tenant.phoneNumberId}/messages`,
@@ -120,9 +137,7 @@ async function postToWhatsApp(tenant, payload) {
     );
     const data = await res.json();
     if (!res.ok) {
-      console.error("WhatsApp Send API error:", JSON.stringify(data, null, 2));
-    } else {
-      console.log("WhatsApp Send API response:", JSON.stringify(data, null, 2));
+      console.error("WhatsApp API error:", JSON.stringify(data, null, 2));
     }
   } catch (err) {
     console.error("WhatsApp fetch error:", err.message || err);
@@ -139,7 +154,17 @@ async function sendText(tenant, to, body) {
   });
 }
 
-async function sendMainMenu(tenant, to) {
+function formatWeekSchedule(doc) {
+  const w = doc.weekSchedule || {};
+  return (
+    `Mon: ${w.Mon || "-"} | Tue: ${w.Tue || "-"} | Wed: ${w.Wed || "-"}\n` +
+    `Thu: ${w.Thu || "-"} | Fri: ${w.Fri || "-"} | Sat: ${w.Sat || "-"}\n` +
+    `Sun: ${w.Sun || "Holiday"}` +
+    (doc.holidayNote ? `\nनोट: ${doc.holidayNote}` : "")
+  );
+}
+
+async function sendOpdHomeMenu(tenant, to) {
   await postToWhatsApp(tenant, {
     messaging_product: "whatsapp",
     recipient_type: "individual",
@@ -150,137 +175,234 @@ async function sendMainMenu(tenant, to) {
       body: {
         text:
           `नमस्ते! *${tenant.brandName}* में आपका स्वागत है।\n` +
-          `कृपया विकल्प चुनें:\n\n` +
-          `• *OPD Token* — क्लिनिक/हॉस्पिटल टोकन\n` +
-          `• *Gym / School* — मेंबरशिप, एडमिशन व फ़ीस\n` +
-          `• *Coaching / Demo* — बैच, डेमो व ऐप सेटअप`,
+          `कृपया नीचे से विकल्प चुनें:\n\n` +
+          `• *Book OPD Token* — डॉक्टर चुनें और टोकन लें\n` +
+          `• *Doctors & Fee* — सभी डॉक्टरों की फ़ीस, टाइमिंग व 1 हफ्ते का शेड्यूल\n` +
+          `• *Help / Timing* — पता व सहायता`,
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "flow_opd", title: "OPD Token" } },
-          { type: "reply", reply: { id: "flow_gym_school", title: "Gym / School" } },
-          { type: "reply", reply: { id: "flow_coaching_demo", title: "Coaching / Demo" } },
+          { type: "reply", reply: { id: "opd_book", title: "Book OPD Token" } },
+          { type: "reply", reply: { id: "opd_schedule", title: "Doctors & Fee" } },
+          { type: "reply", reply: { id: "opd_help", title: "Help / Timing" } },
         ],
       },
     },
   });
 }
 
-async function handleInbound(tenant, from, incomingText, buttonId) {
-  const text = (incomingText || "").trim();
+async function sendDoctorSelectionList(tenant, to, doctors) {
+  if (!doctors.length) {
+    await sendText(
+      tenant,
+      to,
+      `अभी *${tenant.brandName}* के लिए शीट में कोई डॉक्टर एक्टिव नहीं है। कृपया थोड़ी देर बाद प्रयास करें।`
+    );
+    return;
+  }
+
+  // WhatsApp Interactive List (10 डॉक्टर तक सीधे चुनने के लिए)
+  const rows = doctors.slice(0, 10).map((doc) => ({
+    id: `pick_doc_${doc.doctorId}`,
+    title: doc.doctorName.slice(0, 24),
+    description: `Fee ₹${doc.opdFee} | Adv ₹${doc.advanceFee} | ${doc.timing}`.slice(0, 72),
+  }));
+
+  await postToWhatsApp(tenant, {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: "डॉक्टर चुनें" },
+      body: {
+        text: `*${tenant.brandName}* में उपलब्ध डॉक्टरों की सूची नीचे दी गई है। अपॉइंटमेंट/टोकन के लिए डॉक्टर चुनें:`,
+      },
+      action: {
+        button: "Select Doctor",
+        sections: [{ title: "Available Doctors", rows }],
+      },
+    },
+  });
+}
+
+async function sendAllDoctorsScheduleText(tenant, to, doctors) {
+  if (!doctors.length) {
+    await sendText(tenant, to, `अभी डॉक्टर शेड्यूल शीट में उपलब्ध नहीं है।`);
+    return;
+  }
+
+  const blocks = doctors.map(
+    (d, idx) =>
+      `*${idx + 1}. ${d.doctorName}* (${d.specialty})\n` +
+      `• कुल फ़ीस: *₹${d.opdFee}* | एडवांस फ़ीस: *₹${d.advanceFee}*\n` +
+      `• समय: *${d.timing}*\n` +
+      `• साप्ताहिक शेड्यूल:\n${formatWeekSchedule(d)}`
+  );
+
+  await sendText(
+    tenant,
+    to,
+    `*${tenant.brandName} — डॉक्टर लिस्ट व 7-दिन शेड्यूल*\n\n${blocks.join(
+      "\n\n"
+    )}\n\nटोकन बुक करने के लिए *BOOK* लिखें।`
+  );
+}
+
+async function handleOpdFlow(tenant, from, text, buttonId) {
   const lower = text.toLowerCase();
   const session = getSession(tenant.clientId, from);
 
   if (["hi", "hlw", "hello", "namaste", "menu", "start"].includes(lower)) {
     clearSession(tenant.clientId, from);
-    await sendMainMenu(tenant, from);
+    await sendOpdHomeMenu(tenant, from);
     return;
   }
 
-  if (session.step === "OPD_NAME") {
-    const refId = makeRefId("OPD");
+  // डॉक्टर चुनने के बाद मरीज़ का नाम लेकर टोकन + पेमेंट लेजर एंट्री करना
+  if (session.step === "OPD_AWAITING_PATIENT_NAME" && session.data.doctor) {
+    const doc = session.data.doctor;
+    const tokenId = makeId("OPD");
+    const paymentId = makeId("PAY");
+    const visitDate = new Date().toISOString().slice(0, 10);
+
     clearSession(tenant.clientId, from);
-    await saveToSheet(tenant, {
-      sector: "opd",
-      eventType: "opd_token_created",
-      referenceId: refId,
-      personName: text,
-      phone: from,
-      details: "OPD Queue Token",
-      status: "Active Token",
-      amount: 0,
+
+    await postToSheet({
+      action: "create_opd_booking",
+      createdAt: new Date().toISOString(),
+      phoneNumberId: tenant.phoneNumberId,
+      clientName: tenant.brandName,
+      tokenId,
+      paymentId,
+      patientName: text,
+      patientPhone: from,
+      doctorId: doc.doctorId,
+      doctorName: doc.doctorName,
+      visitDate,
+      opdFee: doc.opdFee,
+      advanceFee: doc.advanceFee,
+      paidAmount: 0,
+      paymentMode: doc.advanceFee > 0 ? "Online Advance" : "Counter Cash",
     });
+
+    let msg =
+      `*OPD टोकन बुक हो गया*\n` +
+      `संस्था: *${tenant.brandName}*\n` +
+      `टोकन नंबर: *${tokenId}*\n` +
+      `मरीज़: *${text}*\n` +
+      `डॉक्टर: *${doc.doctorName}* (${doc.specialty})\n` +
+      `समय: *${doc.timing}*\n` +
+      `कुल फ़ीस: *₹${doc.opdFee}*\n`;
+
+    if (doc.advanceFee > 0) {
+      const payLink = tenant.upiOrPayBaseUrl
+        ? `${tenant.upiOrPayBaseUrl}?token=${tokenId}&amount=${doc.advanceFee}`
+        : "";
+      msg +=
+        `एडवांस फ़ीस: *₹${doc.advanceFee}* (पेमेंट ID: ${paymentId})\n` +
+        (payLink ? `एडवांस पेमेंट लिंक: ${payLink}\n` : "") +
+        `स्थिति: *Advance Pending* (पेमेंट के बाद कन्फ़र्म रसीद मिलेगी)\n`;
+    } else {
+      msg += `स्थिति: *Confirmed (फ़ीस क्लिनिक काउंटर पर)*\n`;
+    }
+
+    msg += `\nमुख्य मेनू के लिए *MENU* लिखें।`;
+    await sendText(tenant, from, msg);
+    return;
+  }
+
+  // Interactive List से डॉक्टर चुना गया
+  if (buttonId && buttonId.startsWith("pick_doc_")) {
+    const chosenDocId = buttonId.replace("pick_doc_", "");
+    const doctors = await fetchDoctorsForTenant(tenant.phoneNumberId);
+    const doc = doctors.find((d) => d.doctorId === chosenDocId);
+
+    if (!doc) {
+      await sendText(tenant, from, `डॉक्टर की जानकारी नहीं मिली। कृपया *BOOK* लिखकर फिर चुनें।`);
+      return;
+    }
+
+    setSession(tenant.clientId, from, "OPD_AWAITING_PATIENT_NAME", { doctor: doc });
     await sendText(
       tenant,
       from,
-      `*OPD टोकन जारी*\nसंस्था: *${tenant.brandName}*\nनाम: *${text}*\nटोकन ID: *${refId}*\nस्थिति: शीट/ऐप डैशबोर्ड में दर्ज\n\nमेनू के लिए *MENU* लिखें।`
+      `आपने चुना है: *${doc.doctorName}* (${doc.specialty})\n` +
+        `• फ़ीस: *₹${doc.opdFee}* | एडवांस: *₹${doc.advanceFee}*\n` +
+        `• समय: *${doc.timing}*\n` +
+        `• साप्ताहिक शेड्यूल:\n${formatWeekSchedule(doc)}\n\n` +
+        `अब कृपया *मरीज़ का पूरा नाम* लिखकर भेजें:`
     );
     return;
   }
 
-  if (session.step === "GYM_SCHOOL_INFO") {
-    const refId = makeRefId("GS");
-    clearSession(tenant.clientId, from);
-    await saveToSheet(tenant, {
-      sector: "gym_school",
-      eventType: "gym_school_request",
-      referenceId: refId,
-      personName: from,
-      phone: from,
-      details: text,
-      status: "New Request",
-      amount: 0,
-    });
-    await sendText(
-      tenant,
-      from,
-      `*रिकॉर्ड सेव हो गया*\nरेफरेंस ID: *${refId}*\nविवरण: ${text}\nस्थिति: डैशबोर्ड शीट में जुड़ गया\n\nमुख्य मेनू के लिए *MENU* लिखें।`
-    );
-    return;
-  }
-
-  if (session.step === "COACHING_DEMO_INFO") {
-    const refId = makeRefId("CD");
-    clearSession(tenant.clientId, from);
-    await saveToSheet(tenant, {
-      sector: "coaching_demo",
-      eventType: "coaching_demo_request",
-      referenceId: refId,
-      personName: from,
-      phone: from,
-      details: text,
-      status: "Demo Scheduled",
-      amount: 0,
-    });
-    await sendText(
-      tenant,
-      from,
-      `*डेमो / पूछताछ दर्ज*\nरेफरेंस ID: *${refId}*\nविवरण: ${text}\nस्थिति: डैशबोर्ड शीट में जुड़ गया\n\nमुख्य मेनू के लिए *MENU* लिखें।`
-    );
-    return;
-  }
-
-  if (buttonId === "flow_opd" || lower === "1" || lower.includes("opd") || lower.includes("token")) {
-    setSession(tenant.clientId, from, "OPD_NAME");
-    await sendText(tenant, from, `*OPD टोकन*\nकृपया मरीज़ का नाम लिखकर भेजें।`);
+  if (buttonId === "opd_book" || lower === "1" || lower.includes("book") || lower.includes("token")) {
+    const doctors = await fetchDoctorsForTenant(tenant.phoneNumberId);
+    await sendDoctorSelectionList(tenant, from, doctors);
     return;
   }
 
   if (
-    buttonId === "flow_gym_school" ||
+    buttonId === "opd_schedule" ||
     lower === "2" ||
-    lower.includes("gym") ||
-    lower.includes("school")
+    lower.includes("doctor") ||
+    lower.includes("fee") ||
+    lower.includes("schedule")
   ) {
-    setSession(tenant.clientId, from, "GYM_SCHOOL_INFO");
+    const doctors = await fetchDoctorsForTenant(tenant.phoneNumberId);
+    await sendAllDoctorsScheduleText(tenant, from, doctors);
+    return;
+  }
+
+  if (buttonId === "opd_help" || lower === "3" || lower.includes("help")) {
     await sendText(
       tenant,
       from,
-      `*Gym / School*\nकृपया अपना नाम, सेक्टर (Gym या School) और ज़रूरत (Membership, Admission, Fee या Attendance) एक मैसेज में लिखें।`
+      `*${tenant.brandName} — सहायता*\n• नया टोकन लेने के लिए *BOOK* लिखें।\n• सभी डॉक्टरों की फ़ीस और 1 हफ्ते का शेड्यूल देखने के लिए *FEE* लिखें।`
     );
     return;
   }
 
-  if (
-    buttonId === "flow_coaching_demo" ||
-    lower === "3" ||
-    lower.includes("coaching") ||
-    lower.includes("demo")
-  ) {
-    setSession(tenant.clientId, from, "COACHING_DEMO_INFO");
-    await sendText(
-      tenant,
-      from,
-      `*Coaching / Demo*\nकृपया अपना नाम, संस्थान/कोचिंग का नाम और ज़रूरत लिखें।`
-    );
-    return;
-  }
-
-  await sendMainMenu(tenant, from);
+  await sendOpdHomeMenu(tenant, from);
 }
 
+// पेमेंट गेटवे (Razorpay/Cashfree) वेबहुक से पेमेंट कन्फ़र्म होने पर शीट अपडेट + WhatsApp रसीद
+app.post("/payment-webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const { phoneNumberId, tokenId, patientPhone, patientName, doctorName, paidAmount, gatewayRef } =
+      req.body || {};
+    if (!tokenId) return;
+
+    const tenant = resolveTenant(phoneNumberId);
+    await postToSheet({
+      action: "confirm_payment",
+      tokenId,
+      paidAmount: Number(paidAmount || 0),
+      gatewayRef: gatewayRef || "PG-CONFIRMED",
+    });
+
+    if (patientPhone) {
+      await sendText(
+        tenant,
+        patientPhone,
+        `*पेमेंट रसीद कन्फ़र्म*\n` +
+          `संस्था: *${tenant.brandName}*\n` +
+          `टोकन नंबर: *${tokenId}*\n` +
+          `मरीज़: *${patientName || ""}*\n` +
+          `डॉक्टर: *${doctorName || ""}*\n` +
+          `जमा राशि: *₹${paidAmount}*\n` +
+          `रेफरेंस: ${gatewayRef || "Confirmed"}`
+      );
+    }
+  } catch (err) {
+    console.error("Payment webhook error:", err);
+  }
+});
+
 app.get("/", (req, res) => {
-  res.status(200).send("AR Enterprises Core WhatsApp + Sheet Engine running.");
+  res.status(200).send("AR Enterprises Multi-Tenant OPD + Ledger Engine running.");
 });
 
 app.get("/webhook", (req, res) => {
@@ -323,7 +445,7 @@ app.post("/webhook", async (req, res) => {
           }
 
           console.log(`[${tenant.brandName}] From ${from}: ${incomingText || buttonId}`);
-          await handleInbound(tenant, from, incomingText, buttonId);
+          await handleOpdFlow(tenant, from, incomingText, buttonId);
         }
       }
     }
@@ -333,5 +455,5 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`AR Enterprises Core Engine running on port ${PORT}`);
+  console.log(`AR Enterprises Multi-Tenant Engine running on port ${PORT}`);
 });
