@@ -1,5 +1,5 @@
 const express = require("express");
-const { getThreeDaySlots, getTwoHourBatches, loadDoctors } = require("./opdBooking");
+const opdFlow = require("./opdBooking");
 
 const app = express();
 app.use(express.json());
@@ -9,7 +9,40 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
 const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
 const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
 const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
+const DEFAULT_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 
+// वैकल्पिक: Render Env में TENANTS_JSON डालने पर बिना कोड बदले नए क्लाइंट जुड़ेंगे
+let ENV_TENANTS = {};
+if (process.env.TENANTS_JSON) {
+  try {
+    ENV_TENANTS = JSON.parse(process.env.TENANTS_JSON);
+  } catch (e) {
+    console.error("Invalid TENANTS_JSON:", e.message);
+  }
+}
+
+// वैकल्पिक प्लग-इन लोडर ताकि फ़ाइल न बनी हो तब भी सर्वर क्रैश न करे
+function safeRequire(modulePath) {
+  try {
+    return require(modulePath);
+  } catch (e) {
+    return null;
+  }
+}
+
+const gymFlow = safeRequire("./gymFlow");
+const coachingFlow = safeRequire("./coachingFlow");
+const schoolFlow = safeRequire("./schoolFlow");
+
+// चारों बिज़नेस सेक्टर पहले से रजिस्टर्ड
+const SECTOR_FLOWS = {
+  opd: opdFlow,
+  gym: gymFlow || opdFlow,
+  coaching: coachingFlow || opdFlow,
+  school: schoolFlow || opdFlow,
+};
+
+// हर क्लाइंट (Phone Number ID) की अपनी अलग Sheet ID और Sector
 const TENANTS = {
   ...(DEFAULT_PHONE_ID
     ? {
@@ -18,38 +51,31 @@ const TENANTS = {
           name: "AR Enterprises",
           sector: "opd",
           token: DEFAULT_TOKEN,
-          sheetTab: "OPD_Tokens",
+          sheetId: DEFAULT_SHEET_ID,
         },
       }
     : {}),
+  ...ENV_TENANTS,
 };
 
 const sessions = new Map();
 const seenMsgs = new Set();
 
-const getTenant = (phoneId) =>
-  TENANTS[phoneId]
-    ? { phoneId, ...TENANTS[phoneId] }
-    : {
-        phoneId,
-        id: "default",
-        name: "AR Enterprises",
-        sector: "opd",
-        token: DEFAULT_TOKEN,
-        sheetTab: "OPD_Tokens",
-      };
+const getTenant = (phoneId) => {
+  const fromMap = (phoneId && TENANTS[phoneId]) || null;
+  if (fromMap) return { phoneId, ...fromMap };
+  return {
+    phoneId,
+    id: phoneId || "default",
+    name: "AR Enterprises",
+    sector: "opd",
+    token: DEFAULT_TOKEN,
+    sheetId: DEFAULT_SHEET_ID,
+  };
+};
 
 const getSession = (key) => sessions.get(key) || { lang: "hi", step: null, data: {} };
 const setSession = (key, patch) => sessions.set(key, { ...getSession(key), ...patch });
-
-async function pushToSheet(payload) {
-  if (!SHEET_URL) return;
-  await fetch(SHEET_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch((e) => console.error("Sheet error:", e.message));
-}
 
 async function sendWA(tenant, to, payload) {
   if (!tenant.token || !tenant.phoneId) return;
@@ -68,7 +94,7 @@ const sendLangMenu = (tenant, to) =>
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: `नमस्ते / Hello *${tenant.name}*\nभाषा चुनें / Choose language:` },
+      body: { text: `✨ *${tenant.name}*\nनमस्ते / Hello! भाषा चुनें / Choose language:` },
       action: {
         buttons: [
           { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
@@ -78,238 +104,45 @@ const sendLangMenu = (tenant, to) =>
     },
   });
 
-const sendMainMenu = (tenant, to, lang) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: lang === "en" ? `*${tenant.name}* — Choose an option:` : `*${tenant.name}* — विकल्प चुनें:`,
-      },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "act_book", title: "OPD Booking" } },
-          { type: "reply", reply: { id: "act_status", title: "Live Status" } },
-          { type: "reply", reply: { id: "act_timing", title: "Dr Timing" } },
-        ],
-      },
+function buildContext(tenant, from, sKey) {
+  return {
+    tenant,
+    from,
+    sheetUrl: SHEET_URL,
+    getSession: () => getSession(sKey),
+    setSession: (patch) => setSession(sKey, patch),
+    sendWA: (payload) => sendWA(tenant, from, payload),
+    sendText: (body) => sendText(tenant, from, body),
+    sendLangMenu: () => sendLangMenu(tenant, from),
+    postSheet: async (payload) => {
+      if (!SHEET_URL) return null;
+      const res = await fetch(SHEET_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(tenant.sheetId ? { spreadsheetId: tenant.sheetId } : {}),
+          phoneNumberId: tenant.phoneId,
+          clientName: tenant.name,
+          sector: tenant.sector,
+          ...payload,
+        }),
+      });
+      return res.json().catch(() => null);
     },
-  });
-
-const sendDoctorMenu = (tenant, to, lang, doctors) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "list",
-      header: { type: "text", text: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें" },
-      body: {
-        text: lang === "en" ? "Choose a doctor first:" : "पहले डॉक्टर चुनें:",
-      },
-      action: {
-        button: lang === "en" ? "Doctors" : "डॉक्टर सूची",
-        sections: [
-          {
-            title: lang === "en" ? "Available Doctors" : "उपलब्ध डॉक्टर",
-            rows: doctors.slice(0, 10).map((d) => ({
-              id: `doc_${d.doctorId}`,
-              title: String(d.doctorName).slice(0, 24),
-              description: `Fee ₹${d.opdFee} | Adv ₹${d.advanceFee}`.slice(0, 72),
-            })),
-          },
-        ],
-      },
+    getSheet: async (params = {}) => {
+      if (!SHEET_URL) return null;
+      const qs = new URLSearchParams({
+        phone_number_id: tenant.phoneId || "",
+        ...(tenant.sheetId ? { spreadsheet_id: tenant.sheetId } : {}),
+        ...params,
+      });
+      const res = await fetch(`${SHEET_URL}?${qs.toString()}`);
+      return res.json().catch(() => null);
     },
-  });
-
-const sendDayButtons = (tenant, to, lang, doc, days) =>
-  sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text:
-          lang === "en"
-            ? `Doctor: *${doc.doctorName}*\nSelect booking date:`
-            : `डॉक्टर: *${doc.doctorName}*\nबुकिंग की तारीख चुनें:`,
-      },
-      action: {
-        buttons: days.slice(0, 3).map((d) => ({
-          type: "reply",
-          reply: {
-            id: d.id,
-            title: (lang === "en" ? d.labelEn : d.labelHi).slice(0, 20),
-          },
-        })),
-      },
-    },
-  });
-
-const sendBatchSelector = (tenant, to, lang, doc, day, batches) => {
-  const isEn = lang === "en";
-  const headerText = `${doc ? `${doc.doctorName} | ` : ""}${isEn ? day.labelEn : day.labelHi}`;
-
-  if (batches.length <= 3) {
-    return sendWA(tenant, to, {
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: {
-          text: `${headerText}\n${isEn ? "Select 2-hour batch:" : "2-घंटे का बैच चुनें:"}`,
-        },
-        action: {
-          buttons: batches.map((slot, idx) => ({
-            type: "reply",
-            reply: { id: `batch_${idx}`, title: slot.slice(0, 20) },
-          })),
-        },
-      },
-    });
-  }
-
-  return sendWA(tenant, to, {
-    type: "interactive",
-    interactive: {
-      type: "list",
-      header: { type: "text", text: isEn ? "2-Hr Batches" : "2-घंटे के बैच" },
-      body: {
-        text: `${headerText}\n${isEn ? "Choose a 2-hour batch slot:" : "उपलब्ध 2-घंटे का बैच चुनें:"}`,
-      },
-      action: {
-        button: isEn ? "Select Batch" : "बैच चुनें",
-        sections: [
-          {
-            title: isEn ? "Available Slots" : "उपलब्ध समय",
-            rows: batches.slice(0, 10).map((slot, idx) => ({
-              id: `batch_${idx}`,
-              title: slot.slice(0, 24),
-              description: isEn ? "2-hour OPD batch" : "2 घंटे का OPD बैच",
-            })),
-          },
-        ],
-      },
-    },
-  });
-};
-
-async function routeMessage(tenant, from, text, btnId) {
-  const sKey = `${tenant.id}:${from}`;
-  const prev = getSession(sKey);
-  const low = (text || "").trim().toLowerCase();
-
-  if (["hi", "hello", "start", "lang"].includes(low)) {
-    setSession(sKey, { step: null, data: {} });
-    return sendLangMenu(tenant, from);
-  }
-  if (btnId === "lang_hi" || low === "हिंदी") {
-    setSession(sKey, { lang: "hi", step: null, data: {} });
-    return sendMainMenu(tenant, from, "hi");
-  }
-  if (btnId === "lang_en" || low === "english") {
-    setSession(sKey, { lang: "en", step: null, data: {} });
-    return sendMainMenu(tenant, from, "en");
-  }
-
-  const lang = prev.lang || "hi";
-
-  if (low === "menu") {
-    setSession(sKey, { lang, step: null, data: {} });
-    return sendMainMenu(tenant, from, lang);
-  }
-
-  if (btnId === "act_book" || low === "1" || low.includes("book")) {
-    const doctors = await loadDoctors(SHEET_URL, tenant.phoneId);
-    setSession(sKey, { lang, step: "PICK_DOC", data: { doctors } });
-    return sendDoctorMenu(tenant, from, lang, doctors);
-  }
-
-  if (prev.step === "PICK_DOC" || (btnId && btnId.startsWith("doc_"))) {
-    const doctors = prev.data?.doctors || (await loadDoctors(SHEET_URL, tenant.phoneId));
-    const chosenId = btnId?.startsWith("doc_") ? btnId.replace("doc_", "") : "";
-    const doc =
-      doctors.find((d) => d.doctorId === chosenId) ||
-      doctors[Number(low) - 1] ||
-      doctors.find((d) => text && d.doctorName.toLowerCase().includes(low));
-
-    if (!doc) return sendDoctorMenu(tenant, from, lang, doctors);
-
-    const days = getThreeDaySlots();
-    setSession(sKey, { lang, step: "PICK_DAY", data: { doc, days } });
-    return sendDayButtons(tenant, from, lang, doc, days);
-  }
-
-  if (prev.step === "PICK_DAY" || (btnId && btnId.startsWith("day_"))) {
-    const doc = prev.data?.doc || { doctorName: "Doctor", batches: "" };
-    const days = prev.data?.days || getThreeDaySlots();
-    const day =
-      days.find((d) => d.id === btnId) ||
-      days[Number(low) - 1] ||
-      days.find((d) => text && (d.labelHi.includes(text) || d.labelEn.includes(text)));
-
-    if (!day) return sendDayButtons(tenant, from, lang, doc, days);
-
-    const batches = getTwoHourBatches(doc?.batches, day.isToday);
-    if (!batches.length) {
-      return sendText(
-        tenant,
-        from,
-        lang === "en"
-          ? "No batches left for this date. Type *MENU* to choose another date."
-          : "इस तारीख़ के लिए कोई बैच बाकी नहीं है। दूसरी तारीख़ चुनने के लिए *MENU* लिखें।"
-      );
-    }
-
-    setSession(sKey, { lang, step: "PICK_BATCH", data: { doc, day, batches } });
-    return sendBatchSelector(tenant, from, lang, doc, day, batches);
-  }
-
-  if (prev.step === "PICK_BATCH" || (btnId && btnId.startsWith("batch_"))) {
-    const batches = prev.data?.batches || getTwoHourBatches("", false);
-    let slot = "";
-    if (btnId && btnId.startsWith("batch_")) {
-      slot = batches[Number(btnId.replace("batch_", ""))] || "";
-    } else {
-      slot = batches[Number(low) - 1] || batches.find((b) => b.includes(text)) || "";
-    }
-
-    if (!slot) {
-      return sendBatchSelector(tenant, from, lang, prev.data?.doc, prev.data?.day, batches);
-    }
-
-    setSession(sKey, { lang, step: "ASK_NAME", data: { ...prev.data, slot } });
-    return sendText(
-      tenant,
-      from,
-      lang === "en"
-        ? `Batch: *${slot}*\nEnter patient name:`
-        : `बैच: *${slot}*\nमरीज़ का नाम लिखें:`
-    );
-  }
-
-  if (prev.step === "ASK_NAME") {
-    const tokenId = `OPD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const record = {
-      sheetTab: tenant.sheetTab,
-      tokenId,
-      patientName: text,
-      doctorName: prev.data?.doc?.doctorName || "",
-      date: prev.data?.day?.date || "",
-      batch: prev.data?.slot || "",
-      phone: from,
-      status: "Waiting",
-    };
-    setSession(sKey, { lang, step: null, data: {} });
-    await pushToSheet(record);
-    return sendText(
-      tenant,
-      from,
-      `Token: *${tokenId}*\nName: *${text}*\nDoctor: *${record.doctorName}*\nDate: *${record.date}*\nBatch: *${record.batch}*`
-    );
-  }
-
-  return sendMainMenu(tenant, from, lang);
+  };
 }
 
-app.get("/", (_, res) => res.send("AR Enterprises Core Ready"));
+app.get("/", (_, res) => res.send("AR Enterprises Multi-Sector Core Ready"));
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
@@ -320,19 +153,51 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-  const entry = req.body?.entry?.[0];
-  const change = entry?.changes?.[0];
-  const value = change?.value;
-  if (!value?.messages?.[0]) return;
+  try {
+    const entry = req.body?.entry?.[0];
+    const value = entry?.changes?.[0]?.value;
+    const msg = value?.messages?.[0];
+    if (!msg || seenMsgs.has(msg.id)) return;
+    seenMsgs.add(msg.id);
 
-  const msg = value.messages[0];
-  if (seenMsgs.has(msg.id)) return;
-  seenMsgs.add(msg.id);
+    const tenant = getTenant(value.metadata?.phone_number_id);
+    const sKey = `${tenant.id}:${msg.from}`;
+    const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
+    const text = (msg.text?.body || btn?.title || "").trim();
+    const btnId = btn?.id || "";
+    const low = text.toLowerCase();
+    const ctx = buildContext(tenant, msg.from, sKey);
+    const flow = SECTOR_FLOWS[tenant.sector] || opdFlow;
 
-  const tenant = getTenant(value.metadata?.phone_number_id);
-  const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
-  const text = msg.text?.body || btn?.title || "";
-  await routeMessage(tenant, msg.from, text, btn?.id || "");
+    if (["hi", "hello", "start", "lang"].includes(low) || btnId === "act_lang") {
+      setSession(sKey, { step: null, data: {} });
+      return sendLangMenu(tenant, msg.from);
+    }
+    if (btnId === "lang_hi" || low === "हिंदी") {
+      setSession(sKey, { lang: "hi", step: null, data: {} });
+      return flow.sendHomeMenu(ctx, "hi");
+    }
+    if (btnId === "lang_en" || low === "english") {
+      setSession(sKey, { lang: "en", step: null, data: {} });
+      return flow.sendHomeMenu(ctx, "en");
+    }
+
+    await flow.handleMessage(ctx, text, btnId);
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+  }
 });
 
-app.listen(PORT, () => console.log(`Core running on ${PORT}`));
+app.post("/run-reminders", async (req, res) => {
+  try {
+    const phoneId = req.body?.phoneNumberId || DEFAULT_PHONE_ID;
+    const tenant = getTenant(phoneId);
+    const ctx = buildContext(tenant, "", `${tenant.id}:cron`);
+    const result = opdFlow.sendDueReminders ? await opdFlow.sendDueReminders(ctx) : { sent: 0 };
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => console.log(`AR Enterprises Core running on ${PORT}`));
