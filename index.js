@@ -1,5 +1,4 @@
 const express = require("express");
-const axios = require("axios");
 
 const app = express();
 app.use(express.json());
@@ -9,7 +8,7 @@ const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
 
-// डुप्लिकेट webhook deliveries रोकने के लिए इन-मेमोरी सेट (प्रोडक्शन में DB/Redis में ले जा सकते हैं)
+// डुप्लिकेट webhook deliveries रोकने के लिए इन-मेमोरी सेट
 const processedMessageIds = new Set();
 
 function markProcessed(msgId) {
@@ -23,94 +22,83 @@ function markProcessed(msgId) {
   return false;
 }
 
-async function sendWhatsAppText(to, bodyText) {
+async function postToWhatsApp(payload) {
   if (!ACCESS_TOKEN || !PHONE_NUMBER_ID) {
     console.error("Missing ACCESS_TOKEN or PHONE_NUMBER_ID in environment variables");
     return;
   }
 
   try {
-    const response = await axios.post(
+    const res = await fetch(
       `https://graph.facebook.com/v27.0/${PHONE_NUMBER_ID}/messages`,
       {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: {
-          preview_url: false,
-          body: bodyText,
-        },
-      },
-      {
+        method: "POST",
         headers: {
           Authorization: `Bearer ${ACCESS_TOKEN}`,
           "Content-Type": "application/json",
         },
+        body: JSON.stringify(payload),
       }
     );
-    console.log("WhatsApp Send API response:", JSON.stringify(response.data, null, 2));
+
+    const data = await res.json();
+    if (!res.ok) {
+      console.error("WhatsApp Send API error:", JSON.stringify(data, null, 2));
+    } else {
+      console.log("WhatsApp Send API response:", JSON.stringify(data, null, 2));
+    }
   } catch (err) {
-    console.error(
-      "WhatsApp Send API error:",
-      JSON.stringify(err.response?.data || err.message, null, 2)
-    );
+    console.error("Fetch error while calling WhatsApp API:", err.message || err);
   }
 }
 
-async function sendInteractiveMenu(to) {
-  if (!ACCESS_TOKEN || !PHONE_NUMBER_ID) return;
+async function sendWhatsAppText(to, bodyText) {
+  await postToWhatsApp({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "text",
+    text: {
+      preview_url: false,
+      body: bodyText,
+    },
+  });
+}
 
-  try {
-    const response = await axios.post(
-      `https://graph.facebook.com/v27.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "interactive",
-        interactive: {
-          type: "button",
-          body: {
-            text:
-              "नमस्ते! *AR Enterprises* में आपका स्वागत है।\n" +
-              "कृपया नीचे से विकल्प चुनें:\n\n" +
-              "• *OPD / Appointment* — टोकन या अपॉइंटमेंट जानकारी\n" +
-              "• *WhatsApp Bot* — क्लिनिक, स्कूल, जिम या रेस्टोरेंट ऑटोमेशन\n" +
-              "• *Website / Support* — कस्टम वेबसाइट व सहायता",
-          },
-          action: {
-            buttons: [
-              {
-                type: "reply",
-                reply: { id: "menu_opd", title: "OPD Token" },
-              },
-              {
-                type: "reply",
-                reply: { id: "menu_automation", title: "WhatsApp Bot" },
-              },
-              {
-                type: "reply",
-                reply: { id: "menu_support", title: "Website & Help" },
-              },
-            ],
-          },
-        },
+async function sendInteractiveMenu(to) {
+  await postToWhatsApp({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text:
+          "नमस्ते! *AR Enterprises* में आपका स्वागत है।\n" +
+          "कृपया नीचे से विकल्प चुनें:\n\n" +
+          "• *OPD / Appointment* — टोकन या अपॉइंटमेंट जानकारी\n" +
+          "• *WhatsApp Bot* — क्लिनिक, स्कूल, जिम या रेस्टोरेंट ऑटोमेशन\n" +
+          "• *Website / Support* — कस्टम वेबसाइट व सहायता",
       },
-      {
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    console.log("Interactive menu sent:", JSON.stringify(response.data, null, 2));
-  } catch (err) {
-    console.error(
-      "Interactive menu error:",
-      JSON.stringify(err.response?.data || err.message, null, 2)
-    );
-  }
+      action: {
+        buttons: [
+          {
+            type: "reply",
+            reply: { id: "menu_opd", title: "OPD Token" },
+          },
+          {
+            type: "reply",
+            reply: { id: "menu_automation", title: "WhatsApp Bot" },
+          },
+          {
+            type: "reply",
+            reply: { id: "menu_support", title: "Website & Help" },
+          },
+        ],
+      },
+    },
+  });
 }
 
 function buildReplyForInput(inputText, buttonId) {
@@ -184,12 +172,10 @@ function buildReplyForInput(inputText, buttonId) {
   return null;
 }
 
-// Health check
 app.get("/", (req, res) => {
   res.status(200).send("AR Enterprises WhatsApp Bot is running.");
 });
 
-// Webhook Verification (GET)
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -202,9 +188,7 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Inbound Webhook Events (POST)
 app.post("/webhook", async (req, res) => {
-  // Meta को तुरंत 200 OK भेजें ताकि retry न हो
   res.sendStatus(200);
 
   try {
@@ -216,7 +200,6 @@ app.post("/webhook", async (req, res) => {
         const value = change.value || {};
         const phoneNumberId = value.metadata?.phone_number_id;
 
-        // यदि ENV में PHONE_NUMBER_ID सेट है तो मैच करें (डेमो/टेस्ट के दौरान मिसमैच हो तो लॉग करें)
         if (PHONE_NUMBER_ID && phoneNumberId && phoneNumberId !== PHONE_NUMBER_ID) {
           console.warn(
             `Incoming phone_number_id (${phoneNumberId}) differs from ENV PHONE_NUMBER_ID (${PHONE_NUMBER_ID})`
