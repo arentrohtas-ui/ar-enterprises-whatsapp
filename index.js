@@ -1,412 +1,337 @@
-const doctorCache = new Map();
+const express = require("express");
+const crypto = require("crypto");
+const opdFlow = require("./opdBooking");
+const {
+  getUserState,
+  setUserState,
+  clearUserState,
+  saveBusinessData,
+  fetchBusinessData,
+} = require("./dataStore");
 
-function getNowMin(tz = "Asia/Kolkata") {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const map = {};
-  for (const p of parts) if (p.type !== "literal") map[p.type] = p.value;
-  return Number(map.hour || 0) * 60 + Number(map.minute || 0);
-}
-
-function getThreeDaySlots(tz = "Asia/Kolkata") {
-  const now = new Date();
-  const nowMin = getNowMin(tz);
-
-  const fmt = (offset) => {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: tz,
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    }).formatToParts(new Date(now.getTime() + offset * 86400000));
-    const m = {};
-    for (const p of parts) if (p.type !== "literal") m[p.type] = p.value;
-    return `${m.day}-${m.month}-${m.year}`;
-  };
-
-  const startOffset = nowMin >= 1200 ? 1 : 0;
-
-  return [0, 1, 2].map((i) => {
-    const offset = startOffset + i;
-    const date = fmt(offset);
-    const isToday = offset === 0;
-    return {
-      id: `day_${i}`,
-      date,
-      isToday,
-      labelHi: isToday ? `${date} (आज)` : date,
-      labelEn: isToday ? `${date} (Today)` : date,
-    };
-  });
-}
-
-function getTwoHourBatches(rawBatches, isToday, tz = "Asia/Kolkata") {
-  const list = String(
-    rawBatches || "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00"
-  )
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  if (!isToday) return list;
-  const nowMin = getNowMin(tz);
-
-  return list.filter((slot) => {
-    const end = slot.split("-")[1]?.trim();
-    if (!end) return true;
-    const [h, m] = end.split(":").map(Number);
-    return nowMin < h * 60 + (m || 0);
-  });
-}
-
-async function syncDoctors(ctx, force = false) {
-  const key = `${ctx.tenant.phoneId}:${ctx.tenant.sheetId || "default"}`;
-  const cached = doctorCache.get(key);
-  if (!force && cached && Date.now() < cached.expiresAt) return cached.list;
-
-  const fallback = [
-    {
-      doctorId: "DR-1",
-      doctorName: "Dr. R. K. Sharma",
-      specialty: "General Physician",
-      opdFee: 500,
-      advanceFee: 100,
-      batches: "08:00-10:00,10:00-12:00,12:00-14:00,16:00-18:00,18:00-20:00",
-      weekSchedule: "Mon-Sat Open | Sun Holiday",
+const app = express();
+app.use(
+  express.json({
+    verify: (req, _, buf) => {
+      req.rawBody = buf;
     },
-  ];
+  })
+);
 
-  const data = await ctx.getSheet({ action: "get_doctors" });
-  if (data?.ok && Array.isArray(data.doctors) && data.doctors.length) {
-    doctorCache.set(key, { expiresAt: Date.now() + 2 * 60 * 1000, list: data.doctors });
-    return data.doctors;
+const PORT = process.env.PORT || 10000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
+const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
+const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
+const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
+const DEFAULT_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
+const MASTER_SHEET_ID = process.env.MASTER_SHEET_ID || DEFAULT_SHEET_ID;
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "";
+
+let masterCache = { expiresAt: 0, byPhoneId: {}, list: [] };
+
+async function syncMasterSheet(force = false) {
+  if (!force && Date.now() < masterCache.expiresAt) {
+    return masterCache;
   }
-  return cached?.list || fallback;
+  if (!SHEET_URL || !MASTER_SHEET_ID) return masterCache;
+
+  try {
+    const qs = new URLSearchParams({
+      action: "get_clients",
+      master_sheet_id: MASTER_SHEET_ID,
+    });
+    const res = await fetch(`${SHEET_URL}?${qs.toString()}`);
+    const data = await res.json();
+    if (data?.ok && Array.isArray(data.clients)) {
+      const byPhoneId = {};
+      for (const c of data.clients) {
+        if (c.phoneId) byPhoneId[c.phoneId] = c;
+      }
+      masterCache = {
+        expiresAt: Date.now() + 60 * 1000,
+        byPhoneId,
+        list: data.clients,
+      };
+    }
+  } catch (e) {
+    console.error("Master sheet sync error:", e.message);
+  }
+  return masterCache;
 }
 
-async function sendHomeMenu(ctx, lang) {
-  const isEn = lang === "en";
-  return ctx.sendWA({
+async function resolveBusiness(phoneId, extra = {}) {
+  const cache = await syncMasterSheet(false);
+  const found =
+    (phoneId && cache.byPhoneId[phoneId]) ||
+    (extra.businessId &&
+      cache.list.find(
+        (c) => String(c.businessId || "").trim() === String(extra.businessId).trim()
+      )) ||
+    null;
+
+  if (found) {
+    return {
+      id: found.businessId || phoneId || "default_opd",
+      name: found.name || "OPD Clinic",
+      sector: "opd",
+      phoneId: found.phoneId || phoneId || DEFAULT_PHONE_ID,
+      token: found.token || DEFAULT_TOKEN,
+      sheetId: found.sheetId || DEFAULT_SHEET_ID,
+      razorpayKeyId: found.razorpayKeyId || process.env.RAZORPAY_KEY_ID || "",
+      razorpayKeySecret: found.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET || "",
+      razorpayAccountId: found.razorpayAccountId || "",
+      advanceAmount: Number(found.advanceAmount || 0),
+    };
+  }
+
+  return {
+    id: DEFAULT_PHONE_ID || "default_opd",
+    name: "AR Enterprises OPD",
+    sector: "opd",
+    phoneId: phoneId || DEFAULT_PHONE_ID,
+    token: DEFAULT_TOKEN,
+    sheetId: extra.sheetId || DEFAULT_SHEET_ID,
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
+    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
+    razorpayAccountId: "",
+    advanceAmount: 0,
+  };
+}
+
+const seenMessages = new Set();
+
+async function sendWA(business, to, payload) {
+  if (!business.token || !business.phoneId || !to) return;
+  await fetch(`https://graph.facebook.com/v27.0/${business.phoneId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${business.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ messaging_product: "whatsapp", to, ...payload }),
+  }).catch((e) => console.error("WA send error:", e.message));
+}
+
+const sendText = (business, to, body) =>
+  sendWA(business, to, { type: "text", text: { preview_url: false, body } });
+
+const sendLangMenu = (business, to) =>
+  sendWA(business, to, {
     type: "interactive",
     interactive: {
       type: "button",
       body: {
-        text: isEn
-          ? `🏥 *${ctx.tenant.name}*\nSelect a service:`
-          : `🏥 *${ctx.tenant.name}*\nकृपया सेवा चुनें:`,
+        text: `🏥 *${business.name}*\nनमस्ते / Hello! भाषा चुनें / Choose language:`,
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "opd_book", title: "OPD Booking" } },
-          { type: "reply", reply: { id: "opd_status", title: "Live Status" } },
-          { type: "reply", reply: { id: "opd_timing", title: "Dr Timing" } },
+          { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
+          { type: "reply", reply: { id: "lang_en", title: "English" } },
         ],
       },
     },
   });
-}
 
-async function sendDoctorList(ctx, lang, doctors) {
-  const isEn = lang === "en";
-  return ctx.sendWA({
-    type: "interactive",
-    interactive: {
-      type: "list",
-      header: { type: "text", text: isEn ? "Select Doctor" : "डॉक्टर चुनें" },
-      body: {
-        text: isEn ? "Choose a doctor for OPD booking:" : "OPD बुकिंग के लिए डॉक्टर चुनें:",
-      },
-      action: {
-        button: isEn ? "Doctors" : "डॉक्टर सूची",
-        sections: [
-          {
-            title: isEn ? "Available Doctors" : "उपलब्ध डॉक्टर",
-            rows: doctors.slice(0, 10).map((d) => ({
-              id: `doc_${d.doctorId}`,
-              title: String(d.doctorName).slice(0, 24),
-              description: `₹${d.opdFee} | Adv ₹${d.advanceFee} | ${d.specialty}`.slice(0, 72),
-            })),
-          },
-        ],
-      },
-    },
-  });
-}
-
-async function sendDayButtons(ctx, lang, doc, days) {
-  const isEn = lang === "en";
-  return ctx.sendWA({
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: isEn
-          ? `👨‍⚕️ *${doc.doctorName}* (Fee: ₹${doc.opdFee})\nSelect booking date:`
-          : `👨‍⚕️ *${doc.doctorName}* (फ़ीस: ₹${doc.opdFee})\nबुकिंग की तारीख़ चुनें:`,
-      },
-      action: {
-        buttons: days.slice(0, 3).map((d) => ({
-          type: "reply",
-          reply: { id: d.id, title: (isEn ? d.labelEn : d.labelHi).slice(0, 20) },
-        })),
-      },
-    },
-  });
-}
-
-async function sendBatchSelector(ctx, lang, doc, day, batches) {
-  const isEn = lang === "en";
-  const head = `👨‍⚕️ *${doc.doctorName}* | 📅 *${isEn ? day.labelEn : day.labelHi}*`;
-
-  if (batches.length <= 3) {
-    return ctx.sendWA({
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: `${head}\n${isEn ? "Select 2-hour batch:" : "2-घंटे का बैच चुनें:"}` },
-        action: {
-          buttons: batches.map((slot, idx) => ({
-            type: "reply",
-            reply: { id: `batch_${idx}`, title: slot.slice(0, 20) },
-          })),
-        },
-      },
-    });
+async function createRazorpayLink(
+  business,
+  { amountInRupees, tokenId, patientName, phone, description }
+) {
+  const amt = Number(amountInRupees || 0);
+  if (!business.razorpayKeyId || !business.razorpayKeySecret || amt <= 0) {
+    return null;
   }
+  try {
+    const auth = Buffer.from(
+      `${business.razorpayKeyId}:${business.razorpayKeySecret}`
+    ).toString("base64");
+    const cleanPhone = String(phone || "").replace(/\D/g, "").slice(-10);
 
-  return ctx.sendWA({
-    type: "interactive",
-    interactive: {
-      type: "list",
-      header: { type: "text", text: isEn ? "2-Hr Batches" : "2-घंटे के बैच" },
-      body: { text: `${head}\n${isEn ? "Choose a 2-hour batch:" : "2-घंटे का बैच चुनें:"}` },
-      action: {
-        button: isEn ? "Select Batch" : "बैच चुनें",
-        sections: [
-          {
-            title: isEn ? "Available Slots" : "उपलब्ध समय",
-            rows: batches.slice(0, 10).map((slot, idx) => ({
-              id: `batch_${idx}`,
-              title: slot.slice(0, 24),
-              description: isEn ? "2-hour OPD slot" : "2 घंटे का OPD स्लॉट",
-            })),
-          },
-        ],
-      },
-    },
-  });
-}
-
-async function sendLiveStatus(ctx, lang, query = "") {
-  const isEn = lang === "en";
-  const data = await ctx.getSheet({ action: "get_live_status", query });
-  if (!data?.ok) {
-    return ctx.sendText(isEn ? "Live status unavailable right now." : "अभी लाइव स्टेटस उपलब्ध नहीं है।");
-  }
-
-  if (query && Array.isArray(data.matched) && data.matched.length) {
-    const lines = data.matched
-      .slice(-3)
-      .map(
-        (m) =>
-          `• Token: *${m.tokenId}* (${m.patientName})\n` +
-          `  Dr: *${m.doctorName}* | ${m.visitDate} [${m.batchSlot}]\n` +
-          `  Queue: *${m.queueStatus}* | Pay: *${m.paymentStatus}*`
-      )
-      .join("\n\n");
-    return ctx.sendText(
-      (isEn ? "🔎 *Live Token Status:*\n\n" : "🔎 *लाइव टोकन स्टेटस:*\n\n") +
-        lines +
-        (isEn
-          ? `\n\n• Running Token: *${data.currentToken}* | Waiting: *${data.waitingCount}*\nType *MENU* for main menu.`
-          : `\n\n• चालू टोकन: *${data.currentToken}* | प्रतीक्षा में: *${data.waitingCount}*\nमेनू के लिए *MENU* लिखें।`)
-    );
-  }
-
-  ctx.setSession({ lang, step: "STATUS_LOOKUP" });
-  return ctx.sendText(
-    isEn
-      ? `📊 *Live OPD Queue*\n• Current Token in Cabin: *${data.currentToken}*\n• Total Waiting: *${data.waitingCount}*\n\nSend your *Token ID* (e.g. OPD-1234) or *Name* to track, or type *MENU*.`
-      : `📊 *लाइव OPD कतार*\n• केबिन में चालू टोकन: *${data.currentToken}*\n• कुल प्रतीक्षा में: *${data.waitingCount}*\n\nअपना *Token ID* (जैसे OPD-1234) या *नाम* लिखकर देखें, या *MENU* लिखें।`
-  );
-}
-
-async function sendDueReminders(ctx) {
-  const data = await ctx.getSheet({ action: "get_due_reminders" });
-  const list = data?.reminders || [];
-  let sent = 0;
-
-  for (const r of list) {
-    if (!r.patientPhone) continue;
-    await fetch(`https://graph.facebook.com/v27.0/${ctx.tenant.phoneId}/messages`, {
+    const res = await fetch("https://api.razorpay.com/v1/payment_links", {
       method: "POST",
-      headers: { Authorization: `Bearer ${ctx.tenant.token}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: r.patientPhone,
-        type: "text",
-        text: {
-          preview_url: false,
-          body:
-            `⏰ *OPD Reminder — ${ctx.tenant.name}*\n` +
-            `• Token: *${r.tokenId}* | Name: *${r.patientName}*\n` +
-            `• Doctor: *${r.doctorName}*\n` +
-            `• Date: *${r.visitDate}* | Batch: *${r.batchSlot}*`,
+        amount: Math.round(amt * 100),
+        currency: "INR",
+        description: description || `${business.name} - Token ${tokenId}`,
+        customer: {
+          name: patientName || "Patient",
+          ...(cleanPhone.length === 10 ? { contact: `+91${cleanPhone}` } : {}),
+        },
+        notify: { sms: false, email: false },
+        notes: {
+          businessId: business.id || "",
+          phoneNumberId: business.phoneId || "",
+          sheetId: business.sheetId || "",
+          tokenId: tokenId || "",
+          patientName: patientName || "",
+          patientPhone: phone || "",
         },
       }),
-    }).catch(() => {});
-
-    await ctx.postSheet({ action: "mark_reminder_sent", tokenId: r.tokenId });
-    sent += 1;
-  }
-  return { sent };
-}
-
-async function handleMessage(ctx, text, btnId) {
-  const s = ctx.getSession();
-  const lang = s.lang || "hi";
-  const isEn = lang === "en";
-  const low = text.toLowerCase();
-
-  if (low === "menu") {
-    ctx.setSession({ lang, step: null, data: {} });
-    return sendHomeMenu(ctx, lang);
-  }
-
-  if (low === "sync") {
-    const docs = await syncDoctors(ctx, true);
-    return ctx.sendText(isEn ? `✅ Synced ${docs.length} doctors.` : `✅ ${docs.length} डॉक्टर सिंक हो गए।`);
-  }
-
-  if (low === "remind") {
-    const out = await sendDueReminders(ctx);
-    return ctx.sendText(isEn ? `⏰ ${out.sent} reminders sent.` : `⏰ ${out.sent} रिमाइंडर भेजे गए।`);
-  }
-
-  if (btnId === "opd_status" || low.includes("status")) {
-    return sendLiveStatus(ctx, lang);
-  }
-  if (s.step === "STATUS_LOOKUP") {
-    ctx.setSession({ lang, step: null, data: {} });
-    return sendLiveStatus(ctx, lang, text);
-  }
-
-  if (btnId === "opd_timing" || low.includes("timing") || low.includes("fee")) {
-    const docs = await syncDoctors(ctx);
-    const out = docs
-      .map(
-        (d, i) =>
-          `*${i + 1}. ${d.doctorName}* (${d.specialty})\n` +
-          `• Fee: ₹${d.opdFee} | Adv: ₹${d.advanceFee}\n` +
-          `• Batches: ${d.batches}\n` +
-          `• Schedule: ${d.weekSchedule || "Mon-Sat Open | Sun Holiday"}`
-      )
-      .join("\n\n");
-    return ctx.sendText(out + (isEn ? "\n\nType *MENU*." : "\n\nमेनू के लिए *MENU* लिखें।"));
-  }
-
-  if (btnId === "opd_book" || low.includes("book")) {
-    const docs = await syncDoctors(ctx);
-    ctx.setSession({ lang, step: "PICK_DOC", data: { docs } });
-    return sendDoctorList(ctx, lang, docs);
-  }
-
-  if (s.step === "PICK_DOC" || btnId.startsWith("doc_")) {
-    const docs = s.data?.docs || (await syncDoctors(ctx));
-    const id = btnId.startsWith("doc_") ? btnId.replace("doc_", "") : "";
-    const doc = docs.find((d) => d.doctorId === id) || docs[Number(low) - 1];
-    if (!doc) return sendDoctorList(ctx, lang, docs);
-
-    const days = getThreeDaySlots();
-    ctx.setSession({ lang, step: "PICK_DAY", data: { doc, days } });
-    return sendDayButtons(ctx, lang, doc, days);
-  }
-
-  if (s.step === "PICK_DAY" || btnId.startsWith("day_")) {
-    const doc = s.data?.doc || { doctorName: "Doctor", opdFee: 0, batches: "" };
-    const days = s.data?.days || getThreeDaySlots();
-    const day = days.find((d) => d.id === btnId) || days[Number(low) - 1];
-    if (!day) return sendDayButtons(ctx, lang, doc, days);
-
-    const batches = getTwoHourBatches(doc.batches, day.isToday);
-    if (!batches.length) {
-      return ctx.sendText(
-        isEn ? "No batches left today. Type *MENU*." : "आज के लिए कोई बैच बाकी नहीं। *MENU* लिखें।"
-      );
-    }
-    ctx.setSession({ lang, step: "PICK_BATCH", data: { doc, day, batches } });
-    return sendBatchSelector(ctx, lang, doc, day, batches);
-  }
-
-  if (s.step === "PICK_BATCH" || btnId.startsWith("batch_")) {
-    const batches = s.data?.batches || getTwoHourBatches("", false);
-    const slot = btnId.startsWith("batch_")
-      ? batches[Number(btnId.replace("batch_", ""))]
-      : batches[Number(low) - 1];
-    if (!slot) return sendBatchSelector(ctx, lang, s.data?.doc, s.data?.day, batches);
-
-    ctx.setSession({ lang, step: "ASK_NAME", data: { ...s.data, slot } });
-    return ctx.sendText(
-      isEn ? `🕒 Batch: *${slot}*\nEnter *Patient Name*:` : `🕒 बैच: *${slot}*\nकृपया *मरीज़ का नाम* लिखें:`
-    );
-  }
-
-  if (s.step === "ASK_NAME") {
-    const doc = s.data?.doc || {};
-    const day = s.data?.day || {};
-    const slot = s.data?.slot || "";
-    const tokenId = `OPD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const paymentId = `PAY-${Math.floor(1000 + Math.random() * 9000)}`;
-    const payAmount = Number(doc.advanceFee || doc.opdFee || 0);
-
-    ctx.setSession({ lang, step: null, data: {} });
-
-    const rzpLink = ctx.createRazorpayLink
-      ? await ctx.createRazorpayLink({
-          amountInRupees: payAmount,
-          tokenId,
-          patientName: text,
-          phone: ctx.from,
-          description: `${ctx.tenant.name} - ${doc.doctorName} (${tokenId})`,
-        })
-      : null;
-
-    await ctx.postSheet({
-      action: "create_opd_booking",
-      createdAt: new Date().toISOString(),
-      tokenId,
-      paymentId,
-      paymentLinkId: rzpLink?.id || "",
-      patientName: text,
-      patientPhone: ctx.from,
-      doctorId: doc.doctorId || "",
-      doctorName: doc.doctorName || "",
-      visitDate: day.date || "",
-      batchSlot: slot,
-      opdFee: doc.opdFee || 0,
-      advanceFee: doc.advanceFee || 0,
-      paidAmount: 0,
     });
 
-    const payLineEn = rzpLink?.shortUrl
-      ? `\n💳 *Pay Advance (₹${payAmount}):* ${rzpLink.shortUrl}`
-      : `\n💳 Pay ₹${payAmount} at clinic counter.`;
-    const payLineHi = rzpLink?.shortUrl
-      ? `\n💳 *एडवांस पेमेंट (₹${payAmount}) लिंक:* ${rzpLink.shortUrl}`
-      : `\n💳 ₹${payAmount} क्लिनिक काउंटर पर जमा करें।`;
-
-    return ctx.sendText(
-      isEn
-        ? `✅ *OPD Token Generated*\n• Token: *${tokenId}*\n• Name: *${text}*\n• Doctor: *${doc.doctorName}*\n• Date: *${day.date}* | Batch: *${slot}*\n• Fee: ₹${doc.opdFee} | Adv: ₹${doc.advanceFee}${payLineEn}\n\nType *STATUS* for live queue or *MENU*.`
-        : `✅ *OPD टोकन जारी*\n• टोकन ID: *${tokenId}*\n• मरीज़: *${text}*\n• डॉक्टर: *${doc.doctorName}*\n• तारीख़: *${day.date}* | बैच: *${slot}*\n• फ़ीस: ₹${doc.opdFee} | एडवांस: ₹${doc.advanceFee}${payLineHi}\n\nलाइव कतार देखने के लिए *STATUS* या *MENU* लिखें।`
-    );
+    const data = await res.json();
+    if (data?.short_url) {
+      return { id: data.id, shortUrl: data.short_url };
+    }
+  } catch (e) {
+    console.error("Razorpay payment link error:", e.message);
   }
-
-  return sendHomeMenu(ctx, lang);
+  return null;
 }
 
-module.exports = { sendHomeMenu, handleMessage, sendDueReminders };
+function createContext(business, from) {
+  return {
+    tenant: business,
+    business,
+    from,
+    sheetUrl: SHEET_URL,
+    getSession: () => getUserState(business.id, from),
+    setSession: (patch) => setUserState(business.id, from, patch),
+    clearSession: (keepLang = true) => clearUserState(business.id, from, keepLang),
+    sendWA: (payload) => sendWA(business, from, payload),
+    sendText: (body) => sendText(business, from, body),
+    sendLangMenu: () => sendLangMenu(business, from),
+    createRazorpayLink: (opts) => createRazorpayLink(business, opts),
+    postSheet: (payload) =>
+      saveBusinessData({ tenant: business, from, sheetUrl: SHEET_URL }, payload),
+    getSheet: (params) =>
+      fetchBusinessData({ tenant: business, from, sheetUrl: SHEET_URL }, params),
+  };
+}
+
+app.get("/", (_, res) => res.send("AR Enterprises OPD Engine Running"));
+
+app.get("/webhook", (req, res) => {
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === VERIFY_TOKEN
+  ) {
+    return res.status(200).send(req.query["hub.challenge"]);
+  }
+  res.sendStatus(403);
+});
+
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const entry = req.body?.entry?.[0];
+    const value = entry?.changes?.[0]?.value;
+    const msg = value?.messages?.[0];
+    if (!msg || seenMessages.has(msg.id)) return;
+    seenMessages.add(msg.id);
+
+    const incomingPhoneId = value.metadata?.phone_number_id;
+    const business = await resolveBusiness(incomingPhoneId);
+    const ctx = createContext(business, msg.from);
+
+    const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
+    const text = (msg.text?.body || btn?.title || "").trim();
+    const btnId = btn?.id || "";
+    const low = text.toLowerCase();
+
+    if (low === "sync_clients") {
+      await syncMasterSheet(true);
+      return sendText(business, msg.from, "✅ Master sheet synced.");
+    }
+
+    if (["hi", "hello", "start", "lang"].includes(low) || btnId === "act_lang") {
+      clearUserState(business.id, msg.from, true);
+      return sendLangMenu(business, msg.from);
+    }
+
+    if (btnId === "lang_hi" || low === "हिंदी") {
+      setUserState(business.id, msg.from, { lang: "hi", step: null, data: {} });
+      return opdFlow.sendHomeMenu(ctx, "hi");
+    }
+
+    if (btnId === "lang_en" || low === "english") {
+      setUserState(business.id, msg.from, { lang: "en", step: null, data: {} });
+      return opdFlow.sendHomeMenu(ctx, "en");
+    }
+
+    await opdFlow.handleMessage(ctx, text, btnId);
+  } catch (err) {
+    console.error("Webhook error:", err.message);
+  }
+});
+
+app.post("/razorpay-webhook", async (req, res) => {
+  try {
+    if (RAZORPAY_WEBHOOK_SECRET && req.rawBody) {
+      const sig = req.headers["x-razorpay-signature"] || "";
+      const expected = crypto
+        .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
+        .update(req.rawBody)
+        .digest("hex");
+      if (sig !== expected) return res.sendStatus(400);
+    }
+
+    const event = req.body?.event || "";
+    const paymentEntity = req.body?.payload?.payment?.entity || {};
+    const linkEntity = req.body?.payload?.payment_link?.entity || {};
+    const notes = linkEntity.notes || paymentEntity.notes || {};
+
+    if (event === "payment.captured" || event === "payment_link.paid") {
+      const business = await resolveBusiness(notes.phoneNumberId, {
+        businessId: notes.businessId,
+        sheetId: notes.sheetId,
+      });
+      const ctx = createContext(business, notes.patientPhone || "");
+      const paidAmount = Math.round(
+        Number(paymentEntity.amount || linkEntity.amount || 0) / 100
+      );
+
+      await ctx.postSheet({
+        action: "mark_payment_paid",
+        spreadsheetId: notes.sheetId || business.sheetId,
+        businessId: business.id,
+        razorpayAccountId: business.razorpayAccountId || "",
+        tokenId: notes.tokenId || "",
+        paymentLinkId: linkEntity.id || "",
+        razorpayPaymentId: paymentEntity.id || "",
+        patientName: notes.patientName || "",
+        phone: notes.patientPhone || "",
+        paidAmount,
+      });
+
+      if (notes.patientPhone) {
+        await sendText(
+          business,
+          notes.patientPhone,
+          `✅ *Payment Confirmed — ${business.name}*\n` +
+            `• Token ID: *${notes.tokenId || "-"}*\n` +
+            `• Paid Amount: *₹${paidAmount}*\n` +
+            `• Payment ID: *${paymentEntity.id || "-"}*\n\n` +
+            `आपकी बुकिंग पक्की हो गई है। लाइव कतार के लिए *STATUS* लिखें।`
+        );
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Razorpay webhook error:", err.message);
+    res.status(500).json({ ok: false });
+  }
+});
+
+app.post("/run-reminders", async (req, res) => {
+  try {
+    const phoneId = req.body?.phoneNumberId || DEFAULT_PHONE_ID;
+    const business = await resolveBusiness(phoneId, {
+      businessId: req.body?.businessId,
+      sheetId: req.body?.sheetId,
+    });
+    const ctx = createContext(business, "");
+    const result = opdFlow.sendDueReminders
+      ? await opdFlow.sendDueReminders(ctx)
+      : { sent: 0 };
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => console.log(`AR Enterprises OPD Engine running on ${PORT}`));
