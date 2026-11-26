@@ -50,7 +50,8 @@ const MSG = {
 };
 
 function getIstNowParts(offsetDays = 0) {
-  const istMs = Date.now() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000;
+  const istMs =
+    Date.now() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000;
   const d = new Date(istMs);
   const yyyy = String(d.getUTCFullYear());
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -120,7 +121,8 @@ function getValidBatchesForDay(rawBatches, dayInfo) {
         .split(/[|,]/)
         .map((s) => s.trim())
         .filter(Boolean);
-  const list = all.length > 0 ? all : ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"];
+  const list =
+    all.length > 0 ? all : ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"];
   if (dayInfo && dayInfo.index === 0) {
     return list.filter((b) => isBatchStillOpenToday(b));
   }
@@ -128,24 +130,28 @@ function getValidBatchesForDay(rawBatches, dayInfo) {
 }
 
 function getDayIndexForDate(dateIso, allowedDays) {
-  const days = Array.isArray(allowedDays) && allowedDays.length > 0
-    ? allowedDays
-    : getNextThreeDays();
+  const days =
+    Array.isArray(allowedDays) && allowedDays.length > 0
+      ? allowedDays
+      : getNextThreeDays();
   const clean = String(dateIso || "").slice(0, 10);
   return days.findIndex((d) => d.iso === clean);
 }
 
 function getDoctorDateAvailability(doctor, dateIso, allowedDays) {
-  const days = Array.isArray(allowedDays) && allowedDays.length > 0
-    ? allowedDays
-    : getNextThreeDays();
+  const days =
+    Array.isArray(allowedDays) && allowedDays.length > 0
+      ? allowedDays
+      : getNextThreeDays();
   const dayIdx = getDayIndexForDate(dateIso, days);
   if (dayIdx === -1) {
     return { isAvailable: false, code: "A", dayInfo: null };
   }
 
   const dayInfo = days[dayIdx];
-  const slots = Array.isArray(doctor?.dayAvailability) ? doctor.dayAvailability : [];
+  const slots = Array.isArray(doctor?.dayAvailability)
+    ? doctor.dayAvailability
+    : [];
   const slot = slots[dayIdx];
 
   if (slot && String(slot.status || "").trim()) {
@@ -172,7 +178,7 @@ async function loadDoctors(ctx) {
       id: d.id || `DOC_${idx + 1}`,
       name: d.name,
       specialization: d.specialization || "General OPD",
-      days: d.days || "Mon-Sat",
+      days: d.days || "Mon, Tue, Wed, Thu, Fri, Sat",
       batches: getValidBatchesForDay(d.batches, null),
       opdFee: Number(d.opdFee || 0),
       advanceAmount:
@@ -201,9 +207,18 @@ async function sendHomeMenu(ctx, lang = "hi") {
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "opd_book", title: m.bookBtn.slice(0, 20) } },
-          { type: "reply", reply: { id: "opd_status", title: m.statusBtn.slice(0, 20) } },
-          { type: "reply", reply: { id: "opd_timing", title: m.timingBtn.slice(0, 20) } },
+          {
+            type: "reply",
+            reply: { id: "opd_book", title: m.bookBtn.slice(0, 20) },
+          },
+          {
+            type: "reply",
+            reply: { id: "opd_status", title: m.statusBtn.slice(0, 20) },
+          },
+          {
+            type: "reply",
+            reply: { id: "opd_timing", title: m.timingBtn.slice(0, 20) },
+          },
         ],
       },
     },
@@ -235,13 +250,23 @@ async function startDoctorSelection(ctx, lang, purpose = "booking") {
       body: { text: purpose === "availability" ? m.pickAvailDoc : m.pickDoc },
       action: {
         button: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
-        sections: [{ title: lang === "en" ? "Available Doctors" : "उपलब्ध डॉक्टर", rows }],
+        sections: [
+          {
+            title: lang === "en" ? "Available Doctors" : "उपलब्ध डॉक्टर",
+            rows,
+          },
+        ],
       },
     },
   });
 }
 
-async function startDateSelection(ctx, lang, selectedDoctor = null, purpose = "booking") {
+async function startDateSelection(
+  ctx,
+  lang,
+  selectedDoctor = null,
+  purpose = "booking"
+) {
   const m = MSG[lang] || MSG.hi;
   const days = getNextThreeDays();
   const stepName = purpose === "availability" ? "pick_avail_date" : "pick_date";
@@ -252,7 +277,8 @@ async function startDateSelection(ctx, lang, selectedDoctor = null, purpose = "b
     data: {
       days,
       purpose,
-      selectedDoctor: selectedDoctor || ctx.getSession()?.data?.selectedDoctor,
+      selectedDoctor:
+        selectedDoctor || ctx.getSession()?.data?.selectedDoctor,
     },
   });
 
@@ -306,17 +332,32 @@ async function startBatchSelection(ctx, lang, doctor, dayInfo) {
   });
 }
 
-async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedDays) {
+async function sendDoctorAvailabilityReport(
+  ctx,
+  lang,
+  doctor,
+  dateIso,
+  allowedDays
+) {
   const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
   const dayLabel = avail.dayInfo?.fullLabel || dateIso;
-  const availText =
-    lang === "en"
-      ? avail.isAvailable
-        ? "✅ *Available (P)*"
-        : "❌ *Not Available (A)*"
-      : avail.isAvailable
-        ? "✅ *उपलब्ध (P)*"
-        : "❌ *अनुपलब्ध (A)*";
+
+  if (!avail.isAvailable) {
+    const unavailMsg =
+      lang === "en"
+        ? `🩺 *Doctor Timing & Availability*\n\n` +
+          `• Doctor: *${doctor.name}* (${doctor.specialization})\n` +
+          `• Day: *${dayLabel}*\n` +
+          `• Status: ❌ *Not Available (A)*\n` +
+          `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
+        : `🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n` +
+          `• डॉक्टर: *${doctor.name}* (${doctor.specialization})\n` +
+          `• दिन: *${dayLabel}*\n` +
+          `• उपलब्धता: ❌ *अनुपलब्ध (A)*\n` +
+          `• OPD फ़ीस: ₹${doctor.opdFee} | एडवांस: ₹${doctor.advanceAmount}`;
+
+    return ctx.sendText(unavailMsg);
+  }
 
   const activeBatches = getValidBatchesForDay(doctor.batches, avail.dayInfo);
   const batchesText = activeBatches.length
@@ -330,13 +371,13 @@ async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedD
       ? `🩺 *Doctor Timing & Availability*\n\n` +
         `• Doctor: *${doctor.name}* (${doctor.specialization})\n` +
         `• Day: *${dayLabel}*\n` +
-        `• Status: ${availText}\n` +
+        `• Status: ✅ *Available (P)*\n` +
         `• Batches: ${batchesText}\n` +
         `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
       : `🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n` +
         `• डॉक्टर: *${doctor.name}* (${doctor.specialization})\n` +
         `• दिन: *${dayLabel}*\n` +
-        `• उपलब्धता: ${availText}\n` +
+        `• उपलब्धता: ✅ *उपलब्ध (P)*\n` +
         `• बैच: ${batchesText}\n` +
         `• OPD फ़ीस: ₹${doctor.opdFee} | एडवांस: ₹${doctor.advanceAmount}`;
 
@@ -344,7 +385,9 @@ async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedD
 }
 
 async function sendLiveQueueStatus(ctx, lang, queryText = "") {
-  const cleanQuery = ["all", "sab", "सभी"].includes(queryText.trim().toLowerCase())
+  const cleanQuery = ["all", "sab", "सभी"].includes(
+    queryText.trim().toLowerCase()
+  )
     ? ""
     : queryText.trim();
 
@@ -389,7 +432,9 @@ async function sendLiveQueueStatus(ctx, lang, queryText = "") {
 async function finalizeBooking(ctx, lang, sessionData) {
   const tokenId = `OPD-${Date.now().toString().slice(-6)}`;
   const doc = sessionData.selectedDoctor || {};
-  const advanceFee = Number(doc.advanceAmount ?? ctx.business?.advanceAmount ?? 0);
+  const advanceFee = Number(
+    doc.advanceAmount ?? ctx.business?.advanceAmount ?? 0
+  );
   const opdFee = Number(doc.opdFee || 0);
   const patientName = sessionData.patientName;
   const patientAge = sessionData.patientAge;
@@ -486,12 +531,18 @@ async function handleMessage(ctx, text, btnId = "") {
     return startDoctorSelection(ctx, lang, "booking");
   }
 
-  if (btnId === "opd_status" || ["status", "live", "कतार", "स्टेटस"].includes(low)) {
+  if (
+    btnId === "opd_status" ||
+    ["status", "live", "कतार", "स्टेटस"].includes(low)
+  ) {
     ctx.setSession({ lang, step: "ask_status_query" });
     return ctx.sendText(m.statusPrompt);
   }
 
-  if (btnId === "opd_timing" || ["timing", "timings", "fee", "टाइमिंग", "फ़ीस"].includes(low)) {
+  if (
+    btnId === "opd_timing" ||
+    ["timing", "timings", "fee", "टाइमिंग", "फ़ीस"].includes(low)
+  ) {
     return startDoctorSelection(ctx, lang, "availability");
   }
 
@@ -524,7 +575,13 @@ async function handleMessage(ctx, text, btnId = "") {
     }
 
     ctx.setSession({ lang, step: null });
-    return sendDoctorAvailabilityReport(ctx, lang, selectedDoctor, chosenDay.iso, days);
+    return sendDoctorAvailabilityReport(
+      ctx,
+      lang,
+      selectedDoctor,
+      chosenDay.iso,
+      days
+    );
   }
 
   if (session.step === "pick_doctor") {
@@ -570,13 +627,17 @@ async function handleMessage(ctx, text, btnId = "") {
   if (session.step === "pick_batch") {
     const batches =
       session.data?.batches ||
-      getValidBatchesForDay(session.data?.selectedDoctor?.batches, session.data?.dayInfo);
+      getValidBatchesForDay(
+        session.data?.selectedDoctor?.batches,
+        session.data?.dayInfo
+      );
     let batchSlot = "";
     if (btnId.startsWith("batch_")) {
       const idx = Number(btnId.replace("batch_", ""));
       batchSlot = batches[idx] || batches[0];
     } else {
-      batchSlot = batches.find((b) => b.toLowerCase().includes(low)) || text || batches[0];
+      batchSlot =
+        batches.find((b) => b.toLowerCase().includes(low)) || text || batches[0];
     }
 
     ctx.setSession({
@@ -630,7 +691,9 @@ async function handleMessage(ctx, text, btnId = "") {
     let cleanPhone = "";
 
     if (["self", "mera", "मेरा", "यही"].includes(raw.toLowerCase())) {
-      cleanPhone = String(ctx.from || "").replace(/\D/g, "").slice(-10);
+      cleanPhone = String(ctx.from || "")
+        .replace(/\D/g, "")
+        .slice(-10);
     } else {
       const digits = raw.replace(/\D/g, "");
       if (digits.length >= 10) cleanPhone = digits.slice(-10);
@@ -663,7 +726,6 @@ async function sendDueReminders(ctx) {
   for (const item of dueList) {
     const phone = String(item.patientPhone || "").replace(/\D/g, "");
     if (phone.length < 10) continue;
-    const to = phone.length === 10 ? `91${phone}` : phone;
     const bizName = ctx.business?.name || "OPD Clinic";
 
     await ctx.sendText(
