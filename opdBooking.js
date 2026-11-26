@@ -309,7 +309,6 @@ async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedD
         `• OPD फ़ीस: ₹${doctor.opdFee} | एडवांस: ₹${doctor.advanceAmount}`;
 
   await ctx.sendText(msg);
-  await sendHomeMenu(ctx, lang);
 }
 
 async function sendLiveQueueStatus(ctx, lang, queryText = "") {
@@ -328,7 +327,7 @@ async function sendLiveQueueStatus(ctx, lang, queryText = "") {
         ? "Unable to fetch live status right now."
         : "अभी लाइव कतार की जानकारी नहीं मिल पाई है।"
     );
-    return sendHomeMenu(ctx, lang);
+    return;
   }
 
   let msg =
@@ -337,10 +336,13 @@ async function sendLiveQueueStatus(ctx, lang, queryText = "") {
       : `📊 *लाइव OPD कतार*\n• अभी चल रहा टोकन: *${res.currentToken || "-"}*\n• इंतज़ार में मरीज़: *${res.waitingCount ?? 0}*`;
 
   if (Array.isArray(res.matched) && res.matched.length > 0) {
-    const items = res.matched.slice(0, 5).map(
-      (m) =>
-        `• *${m.tokenId}* — ${m.patientName} (${m.doctorName}, ${m.visitDate} | ${m.batchSlot})\n  Status: *${m.queueStatus}* | Payment: *${m.paymentStatus}*`
-    );
+    const items = res.matched.slice(0, 5).map((m) => {
+      const cleanDate = normalizeDateIso(m.visitDate);
+      return (
+        `• *${m.tokenId}* — ${m.patientName} (${m.doctorName}, ${cleanDate} | ${m.batchSlot})\n` +
+        `  Status: *${m.queueStatus}* | Payment: *${m.paymentStatus}*`
+      );
+    });
     msg += `\n\n` + items.join("\n");
   } else if (cleanQuery) {
     msg +=
@@ -350,7 +352,6 @@ async function sendLiveQueueStatus(ctx, lang, queryText = "") {
   }
 
   await ctx.sendText(msg);
-  await sendHomeMenu(ctx, lang);
 }
 
 async function finalizeBooking(ctx, lang, sessionData) {
