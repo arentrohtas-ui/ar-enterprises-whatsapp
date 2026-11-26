@@ -45,6 +45,35 @@ const MSG = {
   },
 };
 
+function normalizeDateIso(rawVal) {
+  if (!rawVal) return "";
+  if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
+    const ist = new Date(rawVal.getTime() + 5.5 * 60 * 60 * 1000);
+    const yyyy = String(ist.getUTCFullYear());
+    const mm = String(ist.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(ist.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  const str = String(rawVal).trim();
+  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]}-${isoMatch[2].padStart(2, "0")}-${isoMatch[3].padStart(2, "0")}`;
+  }
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (dmyMatch) {
+    return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, "0")}-${dmyMatch[1].padStart(2, "0")}`;
+  }
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    const ist = new Date(parsed.getTime() + 5.5 * 60 * 60 * 1000);
+    const yyyy = String(ist.getUTCFullYear());
+    const mm = String(ist.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(ist.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return str;
+}
+
 function getIstDateParts(offsetDays = 0) {
   const utcNow = Date.now() + offsetDays * 24 * 60 * 60 * 1000;
   const istDate = new Date(utcNow + 5.5 * 60 * 60 * 1000);
@@ -75,15 +104,16 @@ function parseBatches(rawBatches) {
 }
 
 function getDoctorDateAvailability(doctor, dateIso, allowedDays) {
+  const targetIso = normalizeDateIso(dateIso);
   const isAllowedDate = Array.isArray(allowedDays)
-    ? allowedDays.some((d) => d.iso === dateIso)
+    ? allowedDays.some((d) => normalizeDateIso(d.iso) === targetIso)
     : true;
   if (!isAllowedDate) {
     return { isAvailable: false, code: "A", label: "Not in allowed 3-day window" };
   }
 
   const slots = Array.isArray(doctor?.dayAvailability) ? doctor.dayAvailability : [];
-  const matchedSlot = slots.find((s) => String(s.date || "").trim() === String(dateIso).trim());
+  const matchedSlot = slots.find((s) => normalizeDateIso(s.date) === targetIso);
 
   if (matchedSlot && String(matchedSlot.status || "").trim()) {
     const code = String(matchedSlot.status || "").trim().toUpperCase();
@@ -233,14 +263,15 @@ async function startBatchSelection(ctx, lang, doctor, visitDate = "") {
 }
 
 function formatDoctorTimingForDate(doctor, dateIso, allowedDays) {
-  const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
+  const targetIso = normalizeDateIso(dateIso);
+  const avail = getDoctorDateAvailability(doctor, targetIso, allowedDays);
   const statusLine = avail.isAvailable
-    ? (ctxLangFallback(doctor, dateIso) || `✅ *Available (${avail.code})*`)
+    ? `✅ *Available (${avail.code})*`
     : `❌ *Not Available (${avail.code})*`;
 
   return (
     `🩺 *${doctor.name}* (${doctor.specialization})\n` +
-    `• Date: *${dateIso}*\n` +
+    `• Date: *${targetIso}*\n` +
     `• Availability: ${statusLine}\n` +
     `• Days: ${doctor.days}\n` +
     `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
@@ -248,12 +279,9 @@ function formatDoctorTimingForDate(doctor, dateIso, allowedDays) {
   );
 }
 
-function ctxLangFallback(doctor, dateIso) {
-  return `✅ *Available (P)* on *${dateIso}*`;
-}
-
 async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedDays) {
-  const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
+  const targetIso = normalizeDateIso(dateIso);
+  const avail = getDoctorDateAvailability(doctor, targetIso, allowedDays);
   const availText =
     lang === "en"
       ? avail.isAvailable
@@ -267,14 +295,14 @@ async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedD
     lang === "en"
       ? `🩺 *Doctor Timing & Availability*\n\n` +
         `• Doctor: *${doctor.name}* (${doctor.specialization})\n` +
-        `• Date: *${dateIso}*\n` +
+        `• Date: *${targetIso}*\n` +
         `• Status: ${availText}\n` +
         `• Days: ${doctor.days}\n` +
         `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
         `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
       : `🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n` +
         `• डॉक्टर: *${doctor.name}* (${doctor.specialization})\n` +
-        `• तारीख़: *${dateIso}*\n` +
+        `• तारीख़: *${targetIso}*\n` +
         `• उपलब्धता: ${availText}\n` +
         `• दिन: ${doctor.days}\n` +
         `• बैच: ${parseBatches(doctor.batches).join(", ")}\n` +
@@ -333,7 +361,7 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const patientName = sessionData.patientName;
   const patientAge = sessionData.patientAge;
   const patientPhone = sessionData.patientPhone;
-  const visitDate = sessionData.visitDate;
+  const visitDate = normalizeDateIso(sessionData.visitDate);
   const batchSlot = sessionData.batchSlot;
   const bizName = ctx.business?.name || "OPD Clinic";
 
@@ -450,7 +478,7 @@ async function handleMessage(ctx, text, btnId = "") {
     const selectedDoctor = session.data?.selectedDoctor;
     let chosenDate = "";
     if (btnId.startsWith("date_")) {
-      chosenDate = btnId.replace("date_", "");
+      chosenDate = normalizeDateIso(btnId.replace("date_", ""));
     } else {
       const match = days.find(
         (d) => d.iso === low || d.label.toLowerCase().includes(low)
@@ -481,7 +509,7 @@ async function handleMessage(ctx, text, btnId = "") {
     const selectedDoctor = session.data?.selectedDoctor;
     let chosenDate = "";
     if (btnId.startsWith("date_")) {
-      chosenDate = btnId.replace("date_", "");
+      chosenDate = normalizeDateIso(btnId.replace("date_", ""));
     } else {
       const match = days.find(
         (d) => d.iso === low || d.label.toLowerCase().includes(low)
@@ -605,4 +633,17 @@ async function sendDueReminders(ctx) {
     );
 
     await ctx.postSheet({
-      action: "mark_15d_reminder
+      action: "mark_15d_reminder_sent",
+      rowIndex: item.rowIndex,
+    });
+    sent++;
+  }
+
+  return { sent };
+}
+
+module.exports = {
+  sendHomeMenu,
+  handleMessage,
+  sendDueReminders,
+};
