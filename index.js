@@ -10,7 +10,6 @@ const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
 const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
 const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
 
-// हर क्लाइंट (Phone Number ID) के हिसाब से अलग बिज़नेस सेटिंग
 const TENANTS = {
   ...(DEFAULT_PHONE_ID
     ? {
@@ -85,10 +84,7 @@ const sendMainMenu = (tenant, to, lang) =>
     interactive: {
       type: "button",
       body: {
-        text:
-          lang === "en"
-            ? `*${tenant.name}* — Choose an option:`
-            : `*${tenant.name}* — विकल्प चुनें:`,
+        text: lang === "en" ? `*${tenant.name}* — Choose an option:` : `*${tenant.name}* — विकल्प चुनें:`,
       },
       action: {
         buttons: [
@@ -96,6 +92,27 @@ const sendMainMenu = (tenant, to, lang) =>
           { type: "reply", reply: { id: "act_status", title: "Live Status" } },
           { type: "reply", reply: { id: "act_timing", title: "Dr Timing" } },
         ],
+      },
+    },
+  });
+
+// ऑटोमैटिक 3-दिन के बटन भेजने का फंक्शन
+const sendDayButtons = (tenant, to, lang, days) =>
+  sendWA(tenant, to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: lang === "en" ? "Select booking date:" : "बुकिंग की तारीख चुनें:",
+      },
+      action: {
+        buttons: days.slice(0, 3).map((d) => ({
+          type: "reply",
+          reply: {
+            id: d.id,
+            title: (lang === "en" ? d.labelEn : d.labelHi).slice(0, 20),
+          },
+        })),
       },
     },
   });
@@ -122,24 +139,23 @@ async function routeMessage(tenant, from, text, btnId) {
     return sendMainMenu(tenant, from, s.lang);
   }
 
-  // 3-दिन व 2-घंटे बैच टेस्ट करने के लिए Booking फ्लो
   if (btnId === "act_book" || low === "1" || low.includes("book")) {
     const days = getThreeDaySlots();
-    const listText = days
-      .map((d, idx) => `${idx + 1}. ${s.lang === "en" ? d.labelEn : d.labelHi}`)
-      .join("\n");
     setSession(sKey, { step: "PICK_DAY", data: { days } });
-    return sendText(
-      tenant,
-      from,
-      (s.lang === "en" ? "Select day (1-3):\n" : "दिन चुनें (1-3):\n") + listText
-    );
+    return sendDayButtons(tenant, from, s.lang, days);
   }
 
   if (s.step === "PICK_DAY") {
-    const idx = Number(low) - 1;
-    const day = s.data.days?.[idx];
-    if (!day) return sendText(tenant, from, "1, 2 या 3 लिखकर दिन चुनें।");
+    const days = s.data.days || getThreeDaySlots();
+    const day =
+      days.find((d) => d.id === btnId) ||
+      days[Number(low) - 1] ||
+      days.find((d) => text && (d.labelHi.includes(text) || d.labelEn.includes(text)));
+
+    if (!day) {
+      return sendDayButtons(tenant, from, s.lang, days);
+    }
+
     const batches = getTwoHourBatches("", day.isToday);
     setSession(sKey, { step: "PICK_BATCH", data: { day, batches } });
     return sendText(
