@@ -1,15 +1,12 @@
-const crypto = require("crypto");
-
 function getCashfreeBaseUrl() {
-  const env = String(process.env.CASHFREE_ENV || "sandbox").trim().toLowerCase();
+  const env = String(process.env.CASHFREE_ENV || "sandbox")
+    .trim()
+    .toLowerCase();
   return env === "production" || env === "prod"
     ? "https://api.cashfree.com/pg"
     : "https://sandbox.cashfree.com/pg";
 }
 
-/**
- * opdBooking.js के ctx.createRazorpayLink की जगह सीधे कॉल होने वाला फ़ंक्शन
- */
 async function createCashfreeLink({
   amountInRupees,
   tokenId,
@@ -25,15 +22,19 @@ async function createCashfreeLink({
     return null;
   }
 
-  const cleanPhone = String(phone || "").replace(/\D/g, "").slice(-10) || "9999999999";
-  const linkId = `${String(tokenId || "OPD").replace(/[^a-zA-Z0-9_-]/g, "")}_${Date.now()}`;
+  const cleanPhone =
+    String(phone || "").replace(/\D/g, "").slice(-10) || "9999999999";
+  const safeToken = String(tokenId || "OPD").replace(/[^a-zA-Z0-9_-]/g, "");
+  const linkId = `${safeToken}_${Date.now()}`;
   const webhookUrl = String(process.env.CASHFREE_WEBHOOK_URL || "").trim();
 
   const payload = {
     link_id: linkId,
     link_amount: Number(amountInRupees),
     link_currency: "INR",
-    link_purpose: String(description || `${businessName} Advance (${tokenId})`).slice(0, 100),
+    link_purpose: String(
+      description || `${businessName} Advance (${tokenId})`
+    ).slice(0, 100),
     customer_details: {
       customer_name: String(patientName || "Patient").slice(0, 50),
       customer_phone: cleanPhone,
@@ -79,9 +80,6 @@ async function createCashfreeLink({
   };
 }
 
-/**
- * Cashfree Webhook से पेमेंट कन्फ़र्म होने पर Google Sheet (Code.gs) अपडेट करना
- */
 async function handleCashfreeWebhook(req, res) {
   try {
     const body = req.body || {};
