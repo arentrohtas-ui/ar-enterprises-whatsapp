@@ -6,8 +6,8 @@ const MSG = {
     timingBtn: "डॉक्टर टाइमिंग व फ़ीस",
     pickDoc: "कृपया डॉक्टर चुनें:",
     pickAvailDoc: "उपलब्धता व टाइमिंग देखने के लिए कृपया डॉक्टर चुनें:",
-    pickDate: "कृपया विज़िट की तारीख़ चुनें:",
-    pickAvailDate: "उपलब्धता देखने के लिए कृपया तारीख़ चुनें:",
+    pickDate: "कृपया विज़िट का दिन चुनें:",
+    pickAvailDate: "उपलब्धता देखने के लिए कृपया दिन चुनें:",
     pickBatch: "कृपया समय का बैच चुनें:",
     askName: "कृपया मरीज़ का पूरा नाम लिखें:",
     askAge: "कृपया मरीज़ की उम्र (साल में) लिखें (जैसे 25):",
@@ -19,7 +19,9 @@ const MSG = {
       "लाइव कतार देखने के लिए अपना *Token ID* या *मरीज़ का नाम* लिखें (या सिर्फ़ *ALL* भेजें):",
     noDoctors: "अभी कोई डॉक्टर उपलब्ध नहीं है। कृपया क्लिनिक शीट में डॉक्टर जोड़ें।",
     docUnavailableOnDate:
-      "माफ़ करें, *${docName}* (${visitDate}) को उपलब्ध नहीं हैं। कृपया डॉक्टर की टाइमिंग देखें और दूसरी तारीख़ चुनें।",
+      "माफ़ करें, *${docName}* (${dayLabel} — ${visitDate}) को उपलब्ध नहीं हैं। कृपया दूसरा दिन चुनें।",
+    noBatchLeftToday:
+      "माफ़ करें, आज (${visitDate}) के सभी बैच का समय (IST) निकल चुका है। कृपया *Next Day* या *+2 Day* चुनें।",
   },
   en: {
     menuTitle: "OPD Service Menu",
@@ -28,8 +30,8 @@ const MSG = {
     timingBtn: "Doctor Timing & Fee",
     pickDoc: "Please select a doctor:",
     pickAvailDoc: "Please select a doctor to check availability & timing:",
-    pickDate: "Please select a visit date:",
-    pickAvailDate: "Please select a date to check availability:",
+    pickDate: "Please select a visit day:",
+    pickAvailDate: "Please select a day to check availability:",
     pickBatch: "Please select a time batch:",
     askName: "Please enter the patient's full name:",
     askAge: "Please enter the patient's age in years (e.g. 25):",
@@ -41,96 +43,122 @@ const MSG = {
       "Enter your *Token ID* or *Patient Name* to check live queue status (or type *ALL*):",
     noDoctors: "No doctors available right now. Please add doctors in the clinic sheet.",
     docUnavailableOnDate:
-      "Sorry, *${docName}* is not available on *${visitDate}*. Please check doctor timing and choose another date.",
+      "Sorry, *${docName}* is not available on *${dayLabel}* (${visitDate}). Please choose another day.",
+    noBatchLeftToday:
+      "Sorry, all batch timings for *Today* (${visitDate}, IST) have passed. Please select *Next Day* or *+2 Day*.",
   },
 };
 
-function normalizeDateIso(rawVal) {
-  if (!rawVal) return "";
-  if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
-    const ist = new Date(rawVal.getTime() + 5.5 * 60 * 60 * 1000);
-    const yyyy = String(ist.getUTCFullYear());
-    const mm = String(ist.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(ist.getUTCDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  const str = String(rawVal).trim();
-  const isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (isoMatch) {
-    return `${isoMatch[1]}-${isoMatch[2].padStart(2, "0")}-${isoMatch[3].padStart(2, "0")}`;
-  }
-  const dmyMatch = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-  if (dmyMatch) {
-    return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, "0")}-${dmyMatch[1].padStart(2, "0")}`;
-  }
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    const ist = new Date(parsed.getTime() + 5.5 * 60 * 60 * 1000);
-    const yyyy = String(ist.getUTCFullYear());
-    const mm = String(ist.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(ist.getUTCDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-  }
-  return str;
-}
-
-function getIstDateParts(offsetDays = 0) {
-  const utcNow = Date.now() + offsetDays * 24 * 60 * 60 * 1000;
-  const istDate = new Date(utcNow + 5.5 * 60 * 60 * 1000);
-  const yyyy = String(istDate.getUTCFullYear());
-  const mm = String(istDate.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(istDate.getUTCDate()).padStart(2, "0");
-  return { yyyy, mm, dd, iso: `${yyyy}-${mm}-${dd}` };
+function getIstNowParts(offsetDays = 0) {
+  const istMs = Date.now() + 5.5 * 60 * 60 * 1000 + offsetDays * 24 * 60 * 60 * 1000;
+  const d = new Date(istMs);
+  const yyyy = String(d.getUTCFullYear());
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = d.getUTCHours();
+  const min = d.getUTCMinutes();
+  return {
+    yyyy,
+    mm,
+    dd,
+    iso: `${yyyy}-${mm}-${dd}`,
+    minutesOfDay: hh * 60 + min,
+  };
 }
 
 function getNextThreeDays() {
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const labels = ["Today", "Next Day", "+2 Day"];
   const days = [];
+
   for (let i = 0; i < 3; i++) {
-    const { dd, mm, yyyy, iso } = getIstDateParts(i);
-    const label =
-      i === 0 ? `Today (${dd}-${mm})` : i === 1 ? `Tomorrow (${dd}-${mm})` : `${dd}-${mm}-${yyyy}`;
-    days.push({ iso, label });
+    const p = getIstNowParts(i);
+    const istDateObj = new Date(`${p.iso}T00:00:00+05:30`);
+    const wName = dayNames[istDateObj.getUTCDay()] || "";
+    const shortLabel = labels[i];
+    const btnTitle = `${shortLabel} (${p.dd}-${p.mm})`;
+    days.push({
+      index: i,
+      iso: p.iso,
+      dayName: wName,
+      shortLabel,
+      label: btnTitle,
+      fullLabel: `${shortLabel} • ${wName} (${p.dd}-${p.mm}-${p.yyyy})`,
+    });
   }
   return days;
 }
 
-function parseBatches(rawBatches) {
-  if (Array.isArray(rawBatches) && rawBatches.length > 0) return rawBatches;
-  const parts = String(rawBatches || "")
-    .split(/[|,]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return parts.length > 0 ? parts : ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"];
+function parseTimeToMinutes(rawTime) {
+  const clean = String(rawTime || "").trim();
+  const m = clean.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+  if (!m) return null;
+  let hours = Number(m[1]);
+  const mins = Number(m[2] || 0);
+  const mer = (m[3] || "").toUpperCase();
+
+  if (mins < 0 || mins > 59) return null;
+  if (mer === "PM" && hours < 12) hours += 12;
+  if (mer === "AM" && hours === 12) hours = 0;
+  if (hours < 0 || hours > 23) return null;
+  return hours * 60 + mins;
+}
+
+function isBatchStillOpenToday(batchStr) {
+  const nowIst = getIstNowParts(0);
+  const parts = String(batchStr || "").split(/\s*[-–to]+\s*/i);
+  if (parts.length < 2) return true;
+  const endMins = parseTimeToMinutes(parts[1]);
+  if (endMins === null) return true;
+  return nowIst.minutesOfDay <= endMins;
+}
+
+function getValidBatchesForDay(rawBatches, dayInfo) {
+  const all = Array.isArray(rawBatches)
+    ? rawBatches
+    : String(rawBatches || "")
+        .split(/[|,]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+  const list = all.length > 0 ? all : ["10:00 AM - 12:00 PM", "05:00 PM - 07:00 PM"];
+  if (dayInfo && dayInfo.index === 0) {
+    return list.filter((b) => isBatchStillOpenToday(b));
+  }
+  return list;
+}
+
+function getDayIndexForDate(dateIso, allowedDays) {
+  const days = Array.isArray(allowedDays) && allowedDays.length > 0
+    ? allowedDays
+    : getNextThreeDays();
+  const clean = String(dateIso || "").slice(0, 10);
+  return days.findIndex((d) => d.iso === clean);
 }
 
 function getDoctorDateAvailability(doctor, dateIso, allowedDays) {
   const days = Array.isArray(allowedDays) && allowedDays.length > 0
     ? allowedDays
     : getNextThreeDays();
-  const targetIso = normalizeDateIso(dateIso);
-  const dayIndex = days.findIndex((d) => normalizeDateIso(d.iso) === targetIso);
-
-  if (dayIndex === -1) {
-    return { isAvailable: false, code: "A", label: "Not in allowed 3-day window" };
+  const dayIdx = getDayIndexForDate(dateIso, days);
+  if (dayIdx === -1) {
+    return { isAvailable: false, code: "A", dayInfo: null };
   }
 
+  const dayInfo = days[dayIdx];
   const slots = Array.isArray(doctor?.dayAvailability) ? doctor.dayAvailability : [];
-  const matchedByDate = slots.find(
-    (s) => s.date && normalizeDateIso(s.date) === targetIso
-  );
-  const slot = matchedByDate || slots[dayIndex];
+  const slot = slots[dayIdx];
 
   if (slot && String(slot.status || "").trim()) {
     const code = String(slot.status || "").trim().toUpperCase();
     if (["A", "ABSENT", "OFF", "NO", "UNAVAILABLE", "0"].includes(code)) {
-      return { isAvailable: false, code: "A", label: "Absent (A)" };
+      return { isAvailable: false, code: "A", dayInfo };
     }
     if (["P", "PRESENT", "ON", "YES", "AVAILABLE", "1"].includes(code)) {
-      return { isAvailable: true, code: "P", label: "Present (P)" };
+      return { isAvailable: true, code: "P", dayInfo };
     }
   }
 
-  return { isAvailable: true, code: "P", label: "Present (P)" };
+  return { isAvailable: true, code: "P", dayInfo };
 }
 
 function isDoctorAvailableOnDate(doctor, dateIso, allowedDays) {
@@ -145,7 +173,7 @@ async function loadDoctors(ctx) {
       name: d.name,
       specialization: d.specialization || "General OPD",
       days: d.days || "Mon-Sat",
-      batches: parseBatches(d.batches),
+      batches: getValidBatchesForDay(d.batches, null),
       opdFee: Number(d.opdFee || 0),
       advanceAmount:
         Number(d.advanceAmount || 0) > 0
@@ -243,13 +271,24 @@ async function startDateSelection(ctx, lang, selectedDoctor = null, purpose = "b
   });
 }
 
-async function startBatchSelection(ctx, lang, doctor, visitDate = "") {
+async function startBatchSelection(ctx, lang, doctor, dayInfo) {
   const m = MSG[lang] || MSG.hi;
-  const batches = parseBatches(doctor?.batches);
+  const batches = getValidBatchesForDay(doctor?.batches, dayInfo);
+  if (!batches.length) {
+    const msg = m.noBatchLeftToday.replace("${visitDate}", dayInfo?.iso || "");
+    await ctx.sendText(msg);
+    return startDateSelection(ctx, lang, doctor, "booking");
+  }
+
   ctx.setSession({
     lang,
     step: "pick_batch",
-    data: { batches, selectedDoctor: doctor, visitDate },
+    data: {
+      batches,
+      selectedDoctor: doctor,
+      visitDate: dayInfo.iso,
+      dayInfo,
+    },
   });
 
   await ctx.sendWA({
@@ -267,26 +306,9 @@ async function startBatchSelection(ctx, lang, doctor, visitDate = "") {
   });
 }
 
-function formatDoctorTimingForDate(doctor, dateIso, allowedDays) {
-  const targetIso = normalizeDateIso(dateIso);
-  const avail = getDoctorDateAvailability(doctor, targetIso, allowedDays);
-  const statusLine = avail.isAvailable
-    ? `✅ *Available (${avail.code})*`
-    : `❌ *Not Available (${avail.code})*`;
-
-  return (
-    `🩺 *${doctor.name}* (${doctor.specialization})\n` +
-    `• Date: *${targetIso}*\n` +
-    `• Availability: ${statusLine}\n` +
-    `• Days: ${doctor.days}\n` +
-    `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
-    `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
-  );
-}
-
 async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedDays) {
-  const targetIso = normalizeDateIso(dateIso);
-  const avail = getDoctorDateAvailability(doctor, targetIso, allowedDays);
+  const avail = getDoctorDateAvailability(doctor, dateIso, allowedDays);
+  const dayLabel = avail.dayInfo?.fullLabel || dateIso;
   const availText =
     lang === "en"
       ? avail.isAvailable
@@ -296,21 +318,26 @@ async function sendDoctorAvailabilityReport(ctx, lang, doctor, dateIso, allowedD
         ? "✅ *उपलब्ध (P)*"
         : "❌ *अनुपलब्ध (A)*";
 
+  const activeBatches = getValidBatchesForDay(doctor.batches, avail.dayInfo);
+  const batchesText = activeBatches.length
+    ? activeBatches.join(", ")
+    : lang === "en"
+      ? "No open batches left for today (IST)"
+      : "आज (IST) के लिए कोई बैच शेष नहीं है";
+
   const msg =
     lang === "en"
       ? `🩺 *Doctor Timing & Availability*\n\n` +
         `• Doctor: *${doctor.name}* (${doctor.specialization})\n` +
-        `• Date: *${targetIso}*\n` +
+        `• Day: *${dayLabel}*\n` +
         `• Status: ${availText}\n` +
-        `• Days: ${doctor.days}\n` +
-        `• Batches: ${parseBatches(doctor.batches).join(", ")}\n` +
+        `• Batches: ${batchesText}\n` +
         `• OPD Fee: ₹${doctor.opdFee} | Advance: ₹${doctor.advanceAmount}`
       : `🩺 *डॉक्टर टाइमिंग व उपलब्धता*\n\n` +
         `• डॉक्टर: *${doctor.name}* (${doctor.specialization})\n` +
-        `• तारीख़: *${targetIso}*\n` +
+        `• दिन: *${dayLabel}*\n` +
         `• उपलब्धता: ${availText}\n` +
-        `• दिन: ${doctor.days}\n` +
-        `• बैच: ${parseBatches(doctor.batches).join(", ")}\n` +
+        `• बैच: ${batchesText}\n` +
         `• OPD फ़ीस: ₹${doctor.opdFee} | एडवांस: ₹${doctor.advanceAmount}`;
 
   await ctx.sendText(msg);
@@ -342,7 +369,7 @@ async function sendLiveQueueStatus(ctx, lang, queryText = "") {
 
   if (Array.isArray(res.matched) && res.matched.length > 0) {
     const items = res.matched.slice(0, 5).map((m) => {
-      const cleanDate = normalizeDateIso(m.visitDate);
+      const cleanDate = String(m.visitDate || "").slice(0, 10);
       return (
         `• *${m.tokenId}* — ${m.patientName} (${m.doctorName}, ${cleanDate} | ${m.batchSlot})\n` +
         `  Status: *${m.queueStatus}* | Payment: *${m.paymentStatus}*`
@@ -367,7 +394,8 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const patientName = sessionData.patientName;
   const patientAge = sessionData.patientAge;
   const patientPhone = sessionData.patientPhone;
-  const visitDate = normalizeDateIso(sessionData.visitDate);
+  const visitDate = String(sessionData.visitDate || "").slice(0, 10);
+  const dayLabel = sessionData.dayInfo?.shortLabel || "";
   const batchSlot = sessionData.batchSlot;
   const bizName = ctx.business?.name || "OPD Clinic";
 
@@ -407,6 +435,8 @@ async function finalizeBooking(ctx, lang, sessionData) {
       ? `🙏 Welcome to *${bizName}*! Wishing you good health.`
       : `🙏 *${bizName}* में आपका स्वागत है! आपके उत्तम स्वास्थ्य की कामना करते हैं।`;
 
+  const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+
   let confirmText =
     `${greetingText}\n\n` +
     (lang === "en"
@@ -414,13 +444,13 @@ async function finalizeBooking(ctx, lang, sessionData) {
         `• Token ID: *${tokenId}*\n` +
         `• Patient: *${patientName}* (${patientAge} yrs)\n` +
         `• Doctor: *${doc.name}*\n` +
-        `• Date & Batch: *${visitDate}* | *${batchSlot}*\n` +
+        `• Day & Batch: *${dayText}* | *${batchSlot}*\n` +
         `• OPD Fee: ₹${opdFee} | Advance Due: ₹${advanceFee}`
       : `✅ *OPD टोकन कन्फ़र्म*\n` +
         `• टोकन ID: *${tokenId}*\n` +
         `• मरीज़: *${patientName}* (${patientAge} वर्ष)\n` +
         `• डॉक्टर: *${doc.name}*\n` +
-        `• तारीख़ व बैच: *${visitDate}* | *${batchSlot}*\n` +
+        `• दिन व बैच: *${dayText}* | *${batchSlot}*\n` +
         `• OPD फ़ीस: ₹${opdFee} | एडवांस राशि: ₹${advanceFee}`);
 
   if (payLink?.shortUrl) {
@@ -482,18 +512,19 @@ async function handleMessage(ctx, text, btnId = "") {
   if (session.step === "pick_avail_date") {
     const days = session.data?.days || getNextThreeDays();
     const selectedDoctor = session.data?.selectedDoctor;
-    let chosenDate = "";
+    let chosenDay = days[0];
     if (btnId.startsWith("date_")) {
-      chosenDate = normalizeDateIso(btnId.replace("date_", ""));
+      const idVal = btnId.replace("date_", "");
+      chosenDay = days.find((d) => d.iso === idVal) || days[0];
     } else {
       const match = days.find(
-        (d) => d.iso === low || d.label.toLowerCase().includes(low)
+        (d) => d.iso === low || d.shortLabel.toLowerCase().includes(low)
       );
-      chosenDate = match ? match.iso : days[0].iso;
+      if (match) chosenDay = match;
     }
 
     ctx.setSession({ lang, step: null });
-    return sendDoctorAvailabilityReport(ctx, lang, selectedDoctor, chosenDate, days);
+    return sendDoctorAvailabilityReport(ctx, lang, selectedDoctor, chosenDay.iso, days);
   }
 
   if (session.step === "pick_doctor") {
@@ -513,31 +544,33 @@ async function handleMessage(ctx, text, btnId = "") {
   if (session.step === "pick_date") {
     const days = session.data?.days || getNextThreeDays();
     const selectedDoctor = session.data?.selectedDoctor;
-    let chosenDate = "";
+    let chosenDay = days[0];
     if (btnId.startsWith("date_")) {
-      chosenDate = normalizeDateIso(btnId.replace("date_", ""));
+      const idVal = btnId.replace("date_", "");
+      chosenDay = days.find((d) => d.iso === idVal) || days[0];
     } else {
       const match = days.find(
-        (d) => d.iso === low || d.label.toLowerCase().includes(low)
+        (d) => d.iso === low || d.shortLabel.toLowerCase().includes(low)
       );
-      chosenDate = match ? match.iso : days[0].iso;
+      if (match) chosenDay = match;
     }
 
-    if (!isDoctorAvailableOnDate(selectedDoctor, chosenDate, days)) {
+    if (!isDoctorAvailableOnDate(selectedDoctor, chosenDay.iso, days)) {
       const warnMsg = m.docUnavailableOnDate
         .replace("${docName}", selectedDoctor?.name || "Doctor")
-        .replace("${visitDate}", chosenDate);
-      const timingBlock = formatDoctorTimingForDate(selectedDoctor, chosenDate, days);
-      await ctx.sendText(`${warnMsg}\n\n${timingBlock}`);
+        .replace("${dayLabel}", chosenDay.fullLabel)
+        .replace("${visitDate}", chosenDay.iso);
+      await ctx.sendText(warnMsg);
       return startDateSelection(ctx, lang, selectedDoctor, "booking");
     }
 
-    return startBatchSelection(ctx, lang, selectedDoctor, chosenDate);
+    return startBatchSelection(ctx, lang, selectedDoctor, chosenDay);
   }
 
   if (session.step === "pick_batch") {
     const batches =
-      session.data?.batches || parseBatches(session.data?.selectedDoctor?.batches);
+      session.data?.batches ||
+      getValidBatchesForDay(session.data?.selectedDoctor?.batches, session.data?.dayInfo);
     let batchSlot = "";
     if (btnId.startsWith("batch_")) {
       const idx = Number(btnId.replace("batch_", ""));
@@ -552,6 +585,7 @@ async function handleMessage(ctx, text, btnId = "") {
       data: {
         selectedDoctor: session.data?.selectedDoctor,
         visitDate: session.data?.visitDate,
+        dayInfo: session.data?.dayInfo,
         batchSlot,
       },
     });
