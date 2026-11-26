@@ -104,19 +104,24 @@ function parseBatches(rawBatches) {
 }
 
 function getDoctorDateAvailability(doctor, dateIso, allowedDays) {
+  const days = Array.isArray(allowedDays) && allowedDays.length > 0
+    ? allowedDays
+    : getNextThreeDays();
   const targetIso = normalizeDateIso(dateIso);
-  const isAllowedDate = Array.isArray(allowedDays)
-    ? allowedDays.some((d) => normalizeDateIso(d.iso) === targetIso)
-    : true;
-  if (!isAllowedDate) {
+  const dayIndex = days.findIndex((d) => normalizeDateIso(d.iso) === targetIso);
+
+  if (dayIndex === -1) {
     return { isAvailable: false, code: "A", label: "Not in allowed 3-day window" };
   }
 
   const slots = Array.isArray(doctor?.dayAvailability) ? doctor.dayAvailability : [];
-  const matchedSlot = slots.find((s) => normalizeDateIso(s.date) === targetIso);
+  const matchedByDate = slots.find(
+    (s) => s.date && normalizeDateIso(s.date) === targetIso
+  );
+  const slot = matchedByDate || slots[dayIndex];
 
-  if (matchedSlot && String(matchedSlot.status || "").trim()) {
-    const code = String(matchedSlot.status || "").trim().toUpperCase();
+  if (slot && String(slot.status || "").trim()) {
+    const code = String(slot.status || "").trim().toUpperCase();
     if (["A", "ABSENT", "OFF", "NO", "UNAVAILABLE", "0"].includes(code)) {
       return { isAvailable: false, code: "A", label: "Absent (A)" };
     }
