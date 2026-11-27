@@ -1,6 +1,7 @@
 const express = require("express");
-const opdBooking = require("./opdBooking");
-const { createCashfreeLink, handleCashfreeWebhook } = require("./cashfreeHelper");
+const { handleOpdMessage } = require("./opd/bookingFlow");
+const { handleAwaitPaymentStep } = require("./opd/paymentAndToken");
+const { formatIstYmd } = require("./opd/menu");
 
 const app = express();
 app.use(express.json());
@@ -13,20 +14,14 @@ const GAS_WEBAPP_URL = String(process.env.GAS_WEBAPP_URL || "").trim();
 const VERIFY_TOKEN = String(
   process.env.VERIFY_TOKEN || "ar_opd_verify_token"
 ).trim();
-const CRON_SECRET = String(process.env.CRON_SECRET || "").trim();
 const STAFF_APP_PIN = String(process.env.STAFF_APP_PIN || "1234").trim();
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const TOKEN_PREFIX = "OPD_";
 const TOKEN_START_NUMBER = 101;
 
 function normalizeDateYmd(input) {
   if (!input) return "";
   if (input instanceof Date && !Number.isNaN(input.getTime())) {
-    const ist = new Date(input.getTime() + IST_OFFSET_MS);
-    const y = ist.getUTCFullYear();
-    const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(ist.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
+    return formatIstYmd(input);
   }
   const s = String(input).trim();
   if (!s) return "";
@@ -49,7 +44,7 @@ function normalizeDateYmd(input) {
 }
 
 function getTodayIstYmd() {
-  return normalizeDateYmd(new Date());
+  return formatIstYmd(new Date());
 }
 
 function formatPhoneWith91(phone) {
@@ -92,7 +87,9 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
     name: String(
       raw.Business_Name || raw.businessName || raw.name || "OPD Clinic"
     ).trim(),
-    category: String(raw.Category || raw.category || "opd").trim(),
+    category: String(raw.Category || raw.category || "opd")
+      .trim()
+      .toLowerCase(),
     phoneId: String(
       raw.Phone_Number_ID ||
         raw.phoneNumberId ||
@@ -175,6 +172,7 @@ async function resolveBusiness(phoneNumberId, sheetId = "") {
     normalizeClientRow(
       {
         Business_Name: "OPD Clinic",
+        Category: "opd",
         Phone_Number_ID: phoneNumberId || "",
         WhatsApp_Token: process.env.WA_TOKEN || "",
         Client_Sheet_ID: sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || "",
@@ -508,13 +506,77 @@ async function verifyCashfreeOrderDirect({
               cleanId,
           };
         }
-      } catch (_) {
-        // try next endpoint
-      }
+      } catch (_) {}
     }
   }
 
   return { status: "PENDING" };
+}
+
+async function createCashfreeLink({
+  amount,
+  customerName,
+  customerPhone,
+  description,
+  spreadsheetId,
+  businessName,
+  cashfreeAppId,
+  cashfreeSecretKey,
+}) {
+  const appId = String(
+    cashfreeAppId || process.env.CASHFREE_APP_ID || ""
+  ).trim();
+  const secretKey = String(
+    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY || ""
+  ).trim();
+
+  if (!appId || !secretKey) {
+    return { error: "Cashfree credentials missing" };
+  }
+
+  const envMode = String(process.env.CASHFREE_ENV || "").toLowerCase();
+  const baseUrl =
+    envMode === "sandbox"
+      ? "https://sandbox.cashfree.com/pg"
+      : "https://api.cashfree.com/pg";
+
+  const linkId = `OPDLINK_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const digits = String(customerPhone || "").replace(/\D/g, "");
+  const phone10 = digits.length >= 10 ? digits.slice(-10) : "9999999999";
+
+  const resp = await fetch(`${baseUrl}/links`, {
+    method: "POST",
+    headers: {
+      "x-client-id": appId,
+      "x-client-secret": secretKey,
+      "x-api-version": "2023-08-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      link_id: linkId,
+      link_amount: Number(amount),
+      link_currency: "INR",
+      link_purpose: String(description || `${businessName || "OPD"} Token`).slice(
+        0,
+        120
+      ),
+      customer_details: {
+        customer_name: String(customerName || "Patient").slice(0, 80),
+        customer_phone: phone10,
+      },
+      link_notes: {
+        spreadsheet_id: String(spreadsheetId || ""),
+        business_name: String(businessName || ""),
+      },
+    }),
+  });
+
+  const data = await resp.json();
+  return {
+    orderId: data?.link_id || linkId,
+    paymentLink: data?.link_url || data?.short_url || "",
+    raw: data,
+  };
 }
 
 function buildCtx(business, from) {
@@ -605,6 +667,44 @@ function buildCtx(business, from) {
   };
 }
 
+async function routeCategoryMessage(ctx, text = "", btnId = "") {
+  const cat = String(ctx.business?.category || "opd").toLowerCase();
+
+  if (cat === "gym") {
+    const mod = require("./gym/index");
+    if (typeof mod.handleMessage === "function") {
+      return mod.handleMessage(ctx, text, btnId);
+    }
+    return ctx.sendText("🏋️ Gym module is coming soon.");
+  }
+
+  if (cat === "school") {
+    const mod = require("./school/index");
+    if (typeof mod.handleMessage === "function") {
+      return mod.handleMessage(ctx, text, btnId);
+    }
+    return ctx.sendText("🏫 School module is coming soon.");
+  }
+
+  if (cat === "coaching") {
+    const mod = require("./coaching/index");
+    if (typeof mod.handleMessage === "function") {
+      return mod.handleMessage(ctx, text, btnId);
+    }
+    return ctx.sendText("📚 Coaching module is coming soon.");
+  }
+
+  const session =
+    typeof ctx.getSession === "function" ? ctx.getSession() : {};
+  const lang = session?.lang === "en" ? "en" : "hi";
+
+  if (session?.step === "AWAIT_PAYMENT") {
+    return handleAwaitPaymentStep(ctx, session.data || {}, lang);
+  }
+
+  return handleOpdMessage(ctx, text, btnId);
+}
+
 function isValidStaffPin(req) {
   const pin = String(
     req.headers["x-staff-pin"] || req.query.pin || req.body?.pin || ""
@@ -620,7 +720,7 @@ function normalizeBookingsList(rawBookings = []) {
 }
 
 app.get("/", (req, res) => {
-  res.status(200).send("AR Enterprises OPD Engine is running.");
+  res.status(200).send("AR Enterprises Multi-Vertical Engine is running.");
 });
 
 app.post("/api/app/login", (req, res) => {
@@ -743,7 +843,12 @@ app.post("/api/app/cash-deposit", async (req, res) => {
 
     const { sheetId, tokenId, amount } = req.body || {};
     const depositAmount = Number(amount);
-    if (!sheetId || !tokenId || !Number.isFinite(depositAmount) || depositAmount <= 0) {
+    if (
+      !sheetId ||
+      !tokenId ||
+      !Number.isFinite(depositAmount) ||
+      depositAmount <= 0
+    ) {
       return res
         .status(400)
         .json({ ok: false, error: "Valid sheetId, tokenId, and amount required" });
@@ -1448,10 +1553,6 @@ app.post("/webhook/cashfree", async (req, res) => {
       return res.status(200).json({ ok: true, autoConfirmed: issued });
     }
 
-    if (typeof handleCashfreeWebhook === "function") {
-      return await handleCashfreeWebhook(req, res);
-    }
-
     return res.status(200).json({ ok: true, received: true });
   } catch (err) {
     console.error("Cashfree Webhook Error:", err);
@@ -1488,7 +1589,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
       }
     }
 
-    await opdBooking.handleMessage(ctx, text, btnId);
+    await routeCategoryMessage(ctx, text, btnId);
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("WA Webhook Error:", err);
@@ -1498,7 +1599,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
 const PORT = Number(process.env.PORT || 10000);
 const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`AR Enterprises OPD Engine running on ${PORT}`);
+  console.log(`AR Enterprises Multi-Vertical Engine running on ${PORT}`);
 });
 
 server.on("error", (err) => {
