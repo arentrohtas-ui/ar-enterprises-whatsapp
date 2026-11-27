@@ -18,6 +18,14 @@ const STAFF_APP_PIN = String(process.env.STAFF_APP_PIN || "1234").trim();
 const TOKEN_PREFIX = "OPD_";
 const TOKEN_START_NUMBER = 101;
 
+function cleanSecretVal(v) {
+  const s = String(v ?? "").trim();
+  if (!s || s.toLowerCase() === "undefined" || s.toLowerCase() === "null") {
+    return "";
+  }
+  return s;
+}
+
 function normalizeDateYmd(input) {
   if (!input) return "";
   if (input instanceof Date && !Number.isNaN(input.getTime())) {
@@ -108,6 +116,19 @@ async function findBookingByTokenId(sheetId, tokenId) {
 }
 
 function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
+  const sheetAppId = cleanSecretVal(
+    raw.Cashfree_App_ID ??
+      raw.cashfreeAppId ??
+      raw.Cashfree_Key_ID ??
+      raw.cashfreeKeyId
+  );
+  const sheetSecretKey = cleanSecretVal(
+    raw.Cashfree_Secret_Key ??
+      raw.cashfreeSecretKey ??
+      raw.Cashfree_Key_Secret ??
+      raw.cashfreeKeySecret
+  );
+
   return {
     id: String(raw.Business_ID || raw.businessId || raw.id || "").trim(),
     name: String(
@@ -123,36 +144,17 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
         fallbackPhoneId ||
         ""
     ).trim(),
-    token: String(
-      raw.WhatsApp_Token ||
-        raw.whatsappToken ||
-        raw.token ||
-        process.env.WA_TOKEN ||
-        ""
-    ).trim(),
-    sheetId: String(
-      raw.Client_Sheet_ID ||
-        raw.clientSheetId ||
-        raw.sheetId ||
-        process.env.DEFAULT_CLINIC_SHEET_ID ||
-        ""
-    ).trim(),
-    cashfreeAppId: String(
-      raw.Cashfree_App_ID ||
-        raw.cashfreeAppId ||
-        raw.Cashfree_Key_ID ||
-        raw.cashfreeKeyId ||
-        process.env.CASHFREE_APP_ID ||
-        ""
-    ).trim(),
-    cashfreeSecretKey: String(
-      raw.Cashfree_Secret_Key ||
-        raw.cashfreeSecretKey ||
-        raw.Cashfree_Key_Secret ||
-        raw.cashfreeKeySecret ||
-        process.env.CASHFREE_SECRET_KEY ||
-        ""
-    ).trim(),
+    token:
+      cleanSecretVal(raw.WhatsApp_Token ?? raw.whatsappToken ?? raw.token) ||
+      String(process.env.WA_TOKEN || "").trim(),
+    sheetId:
+      cleanSecretVal(
+        raw.Client_Sheet_ID ?? raw.clientSheetId ?? raw.sheetId
+      ) || String(process.env.DEFAULT_CLINIC_SHEET_ID || "").trim(),
+    cashfreeAppId:
+      sheetAppId || String(process.env.CASHFREE_APP_ID || "").trim(),
+    cashfreeSecretKey:
+      sheetSecretKey || String(process.env.CASHFREE_SECRET_KEY || "").trim(),
     advanceAmount: Number(
       raw.Advance_Amount ??
         raw.advanceAmount ??
@@ -474,20 +476,21 @@ async function verifyCashfreeOrderDirect({
   cashfreeSecretKey,
 }) {
   const cleanId = String(orderId || "").trim();
-  const appId = String(
-    cashfreeAppId || process.env.CASHFREE_APP_ID || ""
-  ).trim();
-  const secretKey = String(
-    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY || ""
-  ).trim();
+  const appId = cleanSecretVal(cashfreeAppId || process.env.CASHFREE_APP_ID);
+  const secretKey = cleanSecretVal(
+    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY
+  );
 
   if (!cleanId || !appId || !secretKey) {
     return { status: "UNVERIFIED" };
   }
 
+  const isTestKey =
+    appId.toUpperCase().startsWith("TEST") ||
+    secretKey.toLowerCase().includes("_test_");
   const envMode = String(process.env.CASHFREE_ENV || "").toLowerCase();
   const bases =
-    envMode === "sandbox"
+    envMode === "sandbox" || isTestKey
       ? ["https://sandbox.cashfree.com/pg", "https://api.cashfree.com/pg"]
       : ["https://api.cashfree.com/pg", "https://sandbox.cashfree.com/pg"];
 
@@ -549,26 +552,43 @@ async function createCashfreeLink({
   cashfreeAppId,
   cashfreeSecretKey,
 }) {
-  const appId = String(
-    cashfreeAppId || process.env.CASHFREE_APP_ID || ""
-  ).trim();
-  const secretKey = String(
-    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY || ""
-  ).trim();
+  const appId = cleanSecretVal(cashfreeAppId || process.env.CASHFREE_APP_ID);
+  const secretKey = cleanSecretVal(
+    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY
+  );
 
   if (!appId || !secretKey) {
-    return { error: "Cashfree credentials missing" };
+    return {
+      error: "Clients_Master शीट या ENV में Cashfree App ID / Secret Key नहीं मिली।",
+    };
   }
 
+  const numAmount = Number(amount);
+  if (!Number.isFinite(numAmount) || numAmount <= 0) {
+    return { error: `अमान्य पेमेंट राशि: ${amount}` };
+  }
+
+  const isTestKey =
+    appId.toUpperCase().startsWith("TEST") ||
+    secretKey.toLowerCase().includes("_test_");
   const envMode = String(process.env.CASHFREE_ENV || "").toLowerCase();
   const baseUrl =
-    envMode === "sandbox"
+    envMode === "sandbox" || isTestKey
       ? "https://sandbox.cashfree.com/pg"
       : "https://api.cashfree.com/pg";
 
   const linkId = `OPDLINK_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
   const digits = String(customerPhone || "").replace(/\D/g, "");
-  const phone10 = digits.length >= 10 ? digits.slice(-10) : "9999999999";
+  const phone10 =
+    digits.length === 12 && digits.startsWith("91")
+      ? digits.slice(2)
+      : digits.length >= 10
+      ? digits.slice(-10)
+      : "";
+
+  if (phone10.length !== 10) {
+    return { error: "ग्राहक का 10 अंकों का मोबाइल नंबर सही नहीं है।" };
+  }
 
   const resp = await fetch(`${baseUrl}/links`, {
     method: "POST",
@@ -580,14 +600,14 @@ async function createCashfreeLink({
     },
     body: JSON.stringify({
       link_id: linkId,
-      link_amount: Number(amount),
+      link_amount: numAmount,
       link_currency: "INR",
       link_purpose: String(description || `${businessName || "OPD"} Token`).slice(
         0,
         120
       ),
       customer_details: {
-        customer_name: String(customerName || "Patient").slice(0, 80),
+        customer_name: String(customerName || "Patient").trim().slice(0, 80),
         customer_phone: phone10,
       },
       link_notes: {
@@ -597,7 +617,17 @@ async function createCashfreeLink({
     }),
   });
 
-  const data = await resp.json();
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    return {
+      error:
+        data?.message ||
+        data?.code ||
+        `Cashfree API error (HTTP ${resp.status})`,
+      raw: data,
+    };
+  }
+
   return {
     orderId: data?.link_id || linkId,
     paymentLink: data?.link_url || data?.short_url || "",
@@ -657,6 +687,14 @@ function buildCtx(business, from) {
         ...opts,
         spreadsheetId: opts?.spreadsheetId || business.sheetId,
         sheetId: opts?.sheetId || business.sheetId,
+      }),
+    createCashfreeLink: (opts) =>
+      createCashfreeLink({
+        ...opts,
+        spreadsheetId: business.sheetId,
+        businessName: business.name,
+        cashfreeAppId: business.cashfreeAppId,
+        cashfreeSecretKey: business.cashfreeSecretKey,
       }),
     createRazorpayLink: (opts) =>
       createCashfreeLink({
