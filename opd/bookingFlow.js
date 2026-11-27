@@ -1,4 +1,8 @@
 const { sendMainMenu, sendLiveQueueStatus, formatIstYmd } = require("./menu");
+const {
+  initiatePaymentOrBooking,
+  handleAwaitPaymentStep,
+} = require("./paymentAndToken");
 
 function toNumberClean(val, fallback = 0) {
   if (typeof val === "number" && Number.isFinite(val)) return val;
@@ -500,134 +504,18 @@ async function handleBookingStep(ctx, text, btnId) {
       return;
     }
 
-    const doc = normalizeDoctorObj(data.selectedDoctor || {});
-    const opdFee = toNumberClean(doc.opdFee, 0);
-    const advCfg = toNumberClean(
-      doc.advanceAmount || ctx.business?.advanceAmount || 0,
-      0
-    );
-    const payableAmount =
-      advCfg > 0 && advCfg < opdFee ? advCfg : opdFee > 0 ? opdFee : 0;
-
-    const bookingPayload = {
-      lang,
-      selectedDoctor: doc,
-      dayInfo: data.dayInfo,
-      visitDate: data.visitDate,
-      batchSlot: data.batchSlot,
-      patientName: data.patientName,
-      patientAge: data.patientAge,
-      patientPhone: tenDigit,
-      opdFee,
-      payableAmount,
-    };
-
-    if (payableAmount > 0 && typeof ctx.createRazorpayLink === "function") {
-      try {
-        const sheetId = String(ctx.business?.sheetId || "").trim();
-        const linkRes = await ctx.createRazorpayLink({
-          amount: payableAmount,
-          customerName: data.patientName,
-          customerPhone: tenDigit,
-          description: `${doc.name || "OPD"} - ${data.visitDate}`,
-          spreadsheetId: sheetId,
-          spreadsheet_id: sheetId,
-          businessName: ctx.business?.name || "City Care OPD",
-          cashfreeAppId: ctx.business?.cashfreeAppId || "",
-          cashfreeSecretKey: ctx.business?.cashfreeSecretKey || "",
-        });
-
-        const orderId = String(
-          linkRes?.orderId ||
-            linkRes?.order_id ||
-            linkRes?.linkId ||
-            linkRes?.link_id ||
-            linkRes?.id ||
-            ""
-        ).trim();
-        const payUrl = String(
-          linkRes?.paymentLink ||
-            linkRes?.payment_url ||
-            linkRes?.link_url ||
-            linkRes?.url ||
-            ""
-        ).trim();
-
-        if (orderId && typeof ctx.registerPendingPayment === "function") {
-          ctx.registerPendingPayment(orderId, bookingPayload);
-        }
-
-        if (payUrl) {
-          ctx.setSession({
-            lang,
-            step: "AWAIT_PAYMENT",
-            data: { ...bookingPayload, orderId, payUrl },
-          });
-
-          await ctx.sendText(
-            lang === "en"
-              ? `💳 *Complete Payment to Confirm Token*\n\n` +
-                `• Patient: *${data.patientName}* (${data.patientAge} yrs)\n` +
-                `• Doctor: *${doc.name}*\n` +
-                `• Date: *${data.visitDate}* | *${data.batchSlot}*\n` +
-                `• Amount to Pay: *₹${payableAmount}*\n\n` +
-                `Pay here: ${payUrl}\n\n` +
-                `Once paid, your token will be sent automatically.`
-              : `💳 *टोकन कन्फ़र्म करने के लिए पेमेंट करें*\n\n` +
-                `• मरीज़: *${data.patientName}* (${data.patientAge} वर्ष)\n` +
-                `• डॉक्टर: *${doc.name}*\n` +
-                `• तारीख: *${data.visitDate}* | *${data.batchSlot}*\n` +
-                `• देय राशि: *₹${payableAmount}*\n\n` +
-                `पेमेंट लिंक: ${payUrl}\n\n` +
-                `पेमेंट होते ही आपका टोकन अपने आप भेज दिया जाएगा।`
-          );
-          return;
-        }
-
-        await ctx.sendText(
-          lang === "en"
-            ? `⚠️ *Payment Link Error*\nAmount: ₹${payableAmount}\nCould not generate payment link right now.`
-            : `⚠️ *पेमेंट लिंक बनाने में समस्या*\nराशि: ₹${payableAmount}\nअभी पेमेंट लिंक नहीं बन पाया।`
-        );
-        return;
-      } catch (err) {
-        console.error("Payment link creation error:", err);
-        await ctx.sendText(
-          lang === "en"
-            ? `⚠️ Could not create payment link for ₹${payableAmount}.`
-            : `⚠️ ₹${payableAmount} का पेमेंट लिंक नहीं बन सका।`
-        );
-        return;
-      }
-    }
-
-    await ctx.sendText(
-      lang === "en"
-        ? "⚠️ Doctor OPD fee is ₹0, so online payment is not required."
-        : "⚠️ डॉक्टर की OPD फ़ीस ₹0 सेट है, इसलिए पेमेंट नहीं माँगा गया।"
+    const normalizedDoc = normalizeDoctorObj(data.selectedDoctor || {});
+    await initiatePaymentOrBooking(
+      ctx,
+      { ...data, selectedDoctor: normalizedDoc },
+      tenDigit,
+      lang
     );
     return;
   }
 
   if (step === "AWAIT_PAYMENT") {
-    const orderId = String(data.orderId || "").trim();
-    if (orderId && typeof ctx.checkCashfreePaymentStatus === "function") {
-      const statusRes = await ctx.checkCashfreePaymentStatus({ orderId });
-      if (statusRes?.status === "PAID") {
-        await ctx.sendText(
-          lang === "en"
-            ? "✅ Payment verified! Confirming your token..."
-            : "✅ पेमेंट कन्फ़र्म हो गया है! आपका टोकन भेजा जा रहा है..."
-        );
-        return;
-      }
-    }
-
-    await ctx.sendText(
-      lang === "en"
-        ? `⏳ Payment is still pending${data.payUrl ? `:\n${data.payUrl}` : "."}`
-        : `⏳ आपका पेमेंट अभी पेंडिंग है${data.payUrl ? `:\n${data.payUrl}` : "।"}`
-    );
+    await handleAwaitPaymentStep(ctx, data, lang);
   }
 }
 
