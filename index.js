@@ -724,6 +724,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`AR Enterprises OPD Engine running on ${PORT}`);
+});
+
+server.on("error", (err) => {
+  console.error("HTTP Server Error:", err.code || err.message);
 });
