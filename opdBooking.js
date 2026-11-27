@@ -600,21 +600,21 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
     msg +=
       lang === "en"
         ? `🔗 *Cashfree Payment Link:*\n${paymentUrl}\n\n` +
-          `_Complete the payment first, then tap *Paid - Get Token* below._`
+          `_Complete the payment first, then tap *Check Payment* below._`
         : `🔗 *Cashfree पेमेंट लिंक:*\n${paymentUrl}\n\n` +
-          `_पहले पेमेंट पूरा करें, फिर नीचे *Paid - Get Token* बटन दबाएं।_`;
+          `_पहले पेमेंट पूरा करें, फिर नीचे *Check Payment* बटन दबाएं।_`;
   } else {
     msg +=
       lang === "en"
-        ? `⚠️ Cashfree link could not be generated automatically. Please verify gateway credentials or tap *Paid - Get Token* after payment.`
-        : `⚠️ Cashfree लिंक अपने आप नहीं बन सका। पेमेंट सेटिंग जांचें या पेमेंट के बाद *Paid - Get Token* दबाएं।`;
+        ? `⚠️ Cashfree link could not be generated automatically. Please verify gateway credentials or tap *Check Payment* after payment.`
+        : `⚠️ Cashfree लिंक अपने आप नहीं बन सका। पेमेंट सेटिंग जांचें या पेमेंट के बाद *Check Payment* दबाएं।`;
   }
 
   await sendButtonsMessage(ctx, {
     headerText: lang === "en" ? "Complete Payment" : "पेमेंट करें",
     bodyText: msg,
     buttons: [
-      { id: "confirm_paid_token", title: "Paid - Get Token" },
+      { id: "confirm_paid_token", title: "Check Payment" },
       {
         id: "back_menu",
         title: lang === "en" ? "Cancel / Menu" : "रद्द करें / मेनू",
@@ -623,7 +623,74 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
   });
 }
 
+async function verifyPaymentBeforeIssue(ctx, pendingData) {
+  const orderId = String(pendingData?.paymentOrderId || "").trim();
+  if (!orderId) {
+    return { paid: false, reason: "missing_order_id" };
+  }
+
+  if (typeof ctx.isOrderPaid === "function" && ctx.isOrderPaid(orderId)) {
+    return {
+      paid: true,
+      paymentRefId:
+        typeof ctx.getIssuedTokenForOrder === "function"
+          ? ctx.getIssuedTokenForOrder(orderId) || orderId
+          : orderId,
+    };
+  }
+
+  if (typeof ctx.checkCashfreePaymentStatus === "function") {
+    const statusRes = await ctx.checkCashfreePaymentStatus({
+      orderId,
+      linkId: orderId,
+      cashfreeAppId: ctx.business?.cashfreeAppId || "",
+      cashfreeSecretKey: ctx.business?.cashfreeSecretKey || "",
+    });
+    const st = String(
+      statusRes?.status ||
+        statusRes?.order_status ||
+        statusRes?.payment_status ||
+        ""
+    ).toUpperCase();
+    if (["PAID", "SUCCESS", "COMPLETED"].includes(st)) {
+      return {
+        paid: true,
+        paymentRefId:
+          statusRes?.cf_payment_id || statusRes?.reference_id || orderId,
+      };
+    }
+    return { paid: false, status: st || "PENDING" };
+  }
+
+  return { paid: false, status: "UNVERIFIED" };
+}
+
 async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
+  const verification = await verifyPaymentBeforeIssue(ctx, pendingData);
+
+  if (!verification.paid) {
+    const payUrlText = pendingData?.paymentUrl
+      ? `\n🔗 *Payment Link:*\n${pendingData.paymentUrl}\n\n`
+      : "\n\n";
+
+    await sendButtonsMessage(ctx, {
+      headerText:
+        lang === "en" ? "Payment Not Verified" : "पेमेंट वेरिफ़ाई नहीं हुआ",
+      bodyText:
+        lang === "en"
+          ? `❌ Payment is not confirmed yet. Token *${TOKEN_PREFIX}...* cannot be issued without confirmed payment.${payUrlText}Please complete the payment first.`
+          : `❌ अभी पेमेंट कन्फ़र्म नहीं हुआ है। बिना वेरिफ़ाइड पेमेंट के *${TOKEN_PREFIX}...* टोकन जारी नहीं होगा।${payUrlText}कृपया पहले पेमेंट पूरा करें।`,
+      buttons: [
+        { id: "confirm_paid_token", title: "Check Payment" },
+        {
+          id: "back_menu",
+          title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+        },
+      ],
+    });
+    return;
+  }
+
   const spreadsheetId = getClientSheetId(ctx);
   const doc = pendingData.selectedDoctor || {};
   const opdFee = Number(doc.opdFee ?? pendingData.opdFee ?? 0);
@@ -636,6 +703,7 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
   const batchSlot = pendingData.batchSlot;
   const bizName = ctx.business?.name || "City Care OPD";
   const paymentOrderId = pendingData.paymentOrderId || "";
+  const paymentRefId = verification.paymentRefId || paymentOrderId;
 
   let tokenId = pendingData.confirmedTokenId || "";
 
@@ -660,7 +728,7 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
       paymentStatus: "Paid",
       greetingSent: "Yes",
       paymentLinkId: paymentOrderId,
-      paymentRefId: paymentOrderId,
+      paymentRefId,
     });
   }
 
@@ -668,8 +736,8 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
 
   const greetingText =
     lang === "en"
-      ? `🙏 Welcome to *${bizName}*! Payment received & your token is confirmed.`
-      : `🙏 *${bizName}* में आपका स्वागत है! पेमेंट प्राप्त हो गया है और आपका टोकन कन्फ़र्म है।`;
+      ? `🙏 Welcome to *${bizName}*! Payment verified & your token is confirmed.`
+      : `🙏 *${bizName}* में आपका स्वागत है! पेमेंट वेरिफ़ाई हो गया है और आपका टोकन कन्फ़र्म है।`;
 
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
 
@@ -840,13 +908,20 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   }
 
   if (step === "WAIT_PAYMENT") {
-    const paidConfirmed =
+    const checkPaidRequested =
       id === "confirm_paid_token" ||
-      ["paid", "done", "payment done", "pay done", "ho gaya", "हो गया"].includes(
-        text.toLowerCase()
-      );
+      [
+        "paid",
+        "done",
+        "payment done",
+        "pay done",
+        "check",
+        "check payment",
+        "ho gaya",
+        "हो गया",
+      ].includes(text.toLowerCase());
 
-    if (paidConfirmed) {
+    if (checkPaidRequested) {
       await issueConfirmedTokenAfterPayment(ctx, lang, data);
       return;
     }
@@ -859,10 +934,10 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       headerText: lang === "en" ? "Payment Pending" : "पेमेंट बाकी है",
       bodyText:
         lang === "en"
-          ? `⏳ Token *OPD_101+* is issued only after payment.${payUrlText}Tap *Paid - Get Token* once your payment is done.`
-          : `⏳ पेमेंट पूरा होने के बाद ही *OPD_101+* टोकन जारी होगा।${payUrlText}पेमेंट होने के बाद *Paid - Get Token* बटन दबाएं।`,
+          ? `⏳ Token *${TOKEN_PREFIX}101+* is issued only after verified payment.${payUrlText}Complete payment first, then tap *Check Payment*.`
+          : `⏳ वेरिफ़ाइड पेमेंट के बाद ही *${TOKEN_PREFIX}101+* टोकन जारी होगा।${payUrlText}पहले पेमेंट पूरा करें, फिर *Check Payment* दबाएं।`,
       buttons: [
-        { id: "confirm_paid_token", title: "Paid - Get Token" },
+        { id: "confirm_paid_token", title: "Check Payment" },
         {
           id: "back_menu",
           title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
