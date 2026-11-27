@@ -180,6 +180,77 @@ async function sendLiveQueueStatus(ctx, lang = "hi") {
   await ctx.sendText(msg);
 }
 
+async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
+  const lines = doctors.map(
+    (d, idx) =>
+      `*${idx + 1}. ${d.name}* (${d.specialty || "OPD"}) — ₹${Number(d.opdFee || 0)}`
+  );
+
+  // यदि डॉक्टर 3 या उससे कम हैं, तो 3 बटन दिखाएं (WhatsApp button limit = max 3)
+  if (doctors.length <= 3 && typeof ctx.sendWA === "function") {
+    const bodyText =
+      lang === "en"
+        ? `👨‍⚕️ *Choose Doctor* (tap a button or reply number):\n\n${lines.join("\n")}`
+        : `👨‍⚕️ *डॉक्टर चुनें* (बटन दबाएं या नंबर लिखें):\n\n${lines.join("\n")}`;
+
+    const buttons = doctors.map((d, idx) => ({
+      type: "reply",
+      reply: {
+        id: `DOC_${idx}`,
+        title: String(d.name || `Doctor ${idx + 1}`).slice(0, 20),
+      },
+    }));
+
+    const waRes = await ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: bodyText },
+        action: { buttons },
+      },
+    });
+    if (waRes && !waRes.error) return;
+  }
+
+  // यदि 3 से ज़्यादा डॉक्टर हैं या बटन नहीं चल पाए, तो list / choose option भेजें
+  if (doctors.length > 3 && typeof ctx.sendWA === "function") {
+    const rows = doctors.slice(0, 10).map((d, idx) => ({
+      id: `DOC_${idx}`,
+      title: String(d.name || `Doctor ${idx + 1}`).slice(0, 24),
+      description: `${d.specialty || "OPD"} — ₹${Number(d.opdFee || 0)}`.slice(0, 72),
+    }));
+
+    const waRes = await ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: {
+          text:
+            lang === "en"
+              ? "👨‍⚕️ *Choose Doctor* from the option list below:"
+              : "👨‍⚕️ नीचे दिए गए विकल्प में से *डॉक्टर चुनें*:",
+        },
+        action: {
+          button: lang === "en" ? "Choose Doctor" : "डॉक्टर चुनें",
+          sections: [
+            {
+              title: lang === "en" ? "Available Doctors" : "उपलब्ध डॉक्टर",
+              rows,
+            },
+          ],
+        },
+      },
+    });
+    if (waRes && !waRes.error) return;
+  }
+
+  await ctx.sendText(
+    lang === "en"
+      ? `👨‍⚕️ *Choose Doctor* (reply with number):\n\n${lines.join("\n")}`
+      : `👨‍⚕️ *डॉक्टर चुनें* (नंबर लिखकर भेजें):\n\n${lines.join("\n")}`
+  );
+}
+
 async function startBookingFlow(ctx, lang = "hi") {
   const doctors = await fetchClinicDoctors(ctx);
   if (!doctors.length) {
@@ -197,16 +268,7 @@ async function startBookingFlow(ctx, lang = "hi") {
     data: { doctors },
   });
 
-  const lines = doctors.map(
-    (d, idx) =>
-      `*${idx + 1}. ${d.name}* (${d.specialty || "OPD"}) — ₹${Number(d.opdFee || 0)}`
-  );
-
-  await ctx.sendText(
-    lang === "en"
-      ? `👨‍⚕️ *Select Doctor* (reply with number):\n\n${lines.join("\n")}`
-      : `👨‍⚕️ *डॉक्टर चुनें* (नंबर लिखकर भेजें):\n\n${lines.join("\n")}`
-  );
+  await sendDoctorSelectionPrompt(ctx, doctors, lang);
 }
 
 async function handleBookingStep(ctx, text, btnId) {
@@ -222,20 +284,26 @@ async function handleBookingStep(ctx, text, btnId) {
     const num = parseInt(cleanText, 10);
     let picked = null;
 
-    if (!Number.isNaN(num) && num >= 1 && num <= doctors.length) {
+    if (cleanId.startsWith("DOC_")) {
+      const idx = parseInt(cleanId.replace("DOC_", ""), 10);
+      if (!Number.isNaN(idx) && idx >= 0 && idx < doctors.length) {
+        picked = doctors[idx];
+      }
+    }
+
+    if (!picked && !Number.isNaN(num) && num >= 1 && num <= doctors.length) {
       picked = doctors[num - 1];
-    } else if (cleanText) {
+    }
+
+    if (!picked && cleanText) {
       picked = doctors.find(
-        (d) => String(d.name || "").toLowerCase() === cleanText.toLowerCase()
+        (d) =>
+          String(d.name || "").trim().toLowerCase() === cleanText.toLowerCase()
       );
     }
 
     if (!picked) {
-      await ctx.sendText(
-        lang === "en"
-          ? "Please reply with a valid doctor number from the list."
-          : "कृपया सूची में से सही डॉक्टर का नंबर लिखकर भेजें।"
-      );
+      await sendDoctorSelectionPrompt(ctx, doctors, lang);
       return;
     }
 
@@ -263,7 +331,7 @@ async function handleBookingStep(ctx, text, btnId) {
     );
     await ctx.sendText(
       lang === "en"
-        ? `📅 *${picked.name}* — Select Day (reply with number):\n\n${dayLines.join("\n")}`
+        ? `📅 *${picked.name}* — Choose Day (reply with number):\n\n${dayLines.join("\n")}`
         : `📅 *${picked.name}* — दिन चुनें (नंबर लिखकर भेजें):\n\n${dayLines.join("\n")}`
     );
     return;
@@ -294,7 +362,7 @@ async function handleBookingStep(ctx, text, btnId) {
     const slotLines = slots.map((s, idx) => `*${idx + 1}. ${s.label}*`);
     await ctx.sendText(
       lang === "en"
-        ? `⏰ Select Time Slot (reply with number):\n\n${slotLines.join("\n")}`
+        ? `⏰ Choose Time Slot (reply with number):\n\n${slotLines.join("\n")}`
         : `⏰ समय स्लॉट चुनें (नंबर लिखकर भेजें):\n\n${slotLines.join("\n")}`
     );
     return;
@@ -524,13 +592,13 @@ async function handleMessage(ctx, text = "", btnId = "") {
 
   if (
     cleanId === "MENU_LANG" ||
-    cleanText === "3" ||
+    (!session.step && cleanText === "3") ||
     lower === "english" ||
     lower === "hindi" ||
     lower === "हिंदी"
   ) {
     if (lower === "english" || cleanId === "MENU_LANG") {
-      lang = lang === "hi" && !lower.includes("eng") ? "en" : lower === "english" ? "en" : lang === "hi" ? "en" : "hi";
+      lang = lang === "hi" ? "en" : "hi";
     } else if (lower === "hindi" || lower === "हिंदी") {
       lang = "hi";
     } else {
@@ -549,12 +617,22 @@ async function handleMessage(ctx, text = "", btnId = "") {
     return;
   }
 
-  if (cleanId === "MENU_BOOK" || cleanText === "1" || lower.includes("book") || lower.includes("टोकन")) {
+  if (
+    cleanId === "MENU_BOOK" ||
+    (!session.step && cleanText === "1") ||
+    lower.includes("book") ||
+    lower.includes("टोकन")
+  ) {
     await startBookingFlow(ctx, lang);
     return;
   }
 
-  if (cleanId === "MENU_STATUS" || cleanText === "2" || lower.includes("status") || lower.includes("स्टेटस")) {
+  if (
+    cleanId === "MENU_STATUS" ||
+    (!session.step && cleanText === "2") ||
+    lower.includes("status") ||
+    lower.includes("स्टेटस")
+  ) {
     await sendLiveQueueStatus(ctx, lang);
     return;
   }
