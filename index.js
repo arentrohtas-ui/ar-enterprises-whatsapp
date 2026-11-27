@@ -226,7 +226,11 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   if (!cleanOrderId) return { ok: false, reason: "Missing orderId" };
 
   if (issuedOrderTokens.has(cleanOrderId)) {
-    return { ok: true, alreadyIssued: true, tokenId: issuedOrderTokens.get(cleanOrderId) };
+    return {
+      ok: true,
+      alreadyIssued: true,
+      tokenId: issuedOrderTokens.get(cleanOrderId),
+    };
   }
 
   const pending = pendingPayments.get(cleanOrderId);
@@ -239,7 +243,10 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
     pending.sheetId || pending.business?.sheetId || ""
   );
   const sheetId = String(
-    pending.sheetId || business.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
+    pending.sheetId ||
+      business.sheetId ||
+      process.env.DEFAULT_CLINIC_SHEET_ID ||
+      ""
   ).trim();
 
   const tokenId = await getNextOpdTokenForSheet(sheetId);
@@ -250,7 +257,6 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   const dayLabel = pending.dayInfo?.shortLabel || "";
   const visitDate = String(pending.visitDate || "").slice(0, 10);
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
-  const bizName = business.name || pending.businessName || "City Care OPD";
 
   await callGas("POST", {
     action: "create_booking",
@@ -319,7 +325,8 @@ function buildCtx(business, from) {
   return {
     from,
     business,
-    getSession: () => sessions.get(key) || { lang: "hi", step: null, data: {} },
+    getSession: () =>
+      sessions.get(key) || { lang: "hi", step: null, data: {} },
     setSession: (next) => {
       const prev = sessions.get(key) || { lang: "hi", step: null, data: {} };
       sessions.set(key, {
@@ -345,6 +352,10 @@ function buildCtx(business, from) {
         sessionKey: key,
       });
     },
+    isOrderPaid: (orderId) =>
+      issuedOrderTokens.has(String(orderId || "").trim()),
+    getIssuedTokenForOrder: (orderId) =>
+      issuedOrderTokens.get(String(orderId || "").trim()) || "",
     getSheet: (params) =>
       callGas("GET", { ...params, spreadsheet_id: business.sheetId }),
     postSheet: (payload) =>
