@@ -23,8 +23,19 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
     raw.Payment_Mode ?? raw.paymentMode ?? raw.Cashfree_Env ?? raw.cashfreeEnv
   ).toLowerCase();
 
+  const businessId = String(
+    raw.Business_ID || raw.businessId || raw.id || ""
+  ).trim();
+  const opdId = String(
+    raw.OPD_ID || raw.opdId || raw.Opd_Id || businessId || ""
+  ).trim();
+  const fallbackPin =
+    cleanSecretVal(raw.Staff_PIN ?? raw.staffPin) ||
+    String(process.env.STAFF_APP_PIN || "1234").trim();
+
   return {
-    id: String(raw.Business_ID || raw.businessId || raw.id || "").trim(),
+    id: businessId,
+    opdId,
     name: String(
       raw.Business_Name || raw.businessName || raw.name || "Business"
     ).trim(),
@@ -53,9 +64,10 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
       paymentMode === "sandbox" || paymentMode === "production"
         ? paymentMode
         : "",
-    staffPin:
-      cleanSecretVal(raw.Staff_PIN ?? raw.staffPin) ||
-      String(process.env.STAFF_APP_PIN || "1234").trim(),
+    doctorPin: cleanSecretVal(raw.Doctor_PIN ?? raw.doctorPin) || fallbackPin,
+    receptionPin:
+      cleanSecretVal(raw.Reception_PIN ?? raw.receptionPin) || fallbackPin,
+    staffPin: fallbackPin,
     advanceAmount: Number(
       raw.Advance_Amount ??
         raw.advanceAmount ??
