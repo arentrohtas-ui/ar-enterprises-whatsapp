@@ -619,6 +619,10 @@ function normalizeBookingsList(rawBookings = []) {
   }));
 }
 
+app.get("/", (req, res) => {
+  res.status(200).send("AR Enterprises OPD Engine is running.");
+});
+
 app.post("/api/app/login", (req, res) => {
   const pin = String(req.body?.pin || "").trim();
   if (pin !== STAFF_APP_PIN) {
@@ -633,7 +637,9 @@ app.get("/api/app/data", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
     }
     const clients = await getActiveClients();
-    const requestedSheetId = String(req.query.sheetId || "").trim();
+    const requestedSheetId = String(
+      req.query.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
+    ).trim();
     const activeClient =
       clients.find((c) => c.sheetId === requestedSheetId) ||
       clients[0] || {
@@ -659,6 +665,7 @@ app.get("/api/app/data", async (req, res) => {
     const dataRes = await callGas("GET", {
       action: "get_dashboard_data",
       spreadsheet_id: activeClient.sheetId,
+      spreadsheetId: activeClient.sheetId,
     });
 
     return res.status(200).json({
@@ -728,6 +735,40 @@ app.post("/api/app/queue-status", async (req, res) => {
   }
 });
 
+app.post("/api/app/cash-deposit", async (req, res) => {
+  try {
+    if (!isValidStaffPin(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+    }
+
+    const { sheetId, tokenId, amount } = req.body || {};
+    const depositAmount = Number(amount);
+    if (!sheetId || !tokenId || !Number.isFinite(depositAmount) || depositAmount <= 0) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Valid sheetId, tokenId, and amount required" });
+    }
+
+    const gasRes = await callGas("POST", {
+      action: "record_cash_deposit",
+      spreadsheetId: sheetId,
+      spreadsheet_id: sheetId,
+      tokenId: String(tokenId).trim(),
+      depositAmount,
+      amount: depositAmount,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      bookings: normalizeBookingsList(gasRes?.bookings),
+      result: gasRes,
+    });
+  } catch (err) {
+    console.error("Cash Deposit Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/app/doctor-avail", async (req, res) => {
   try {
     if (!isValidStaffPin(req)) {
@@ -763,8 +804,8 @@ function renderStandaloneAppHtml(appRole) {
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
   const subtitleText = isDoctor
-    ? "Doctor App — मरीज़ कतार व उपलब्धता"
-    : "Reception App — कतार, दिया गया शुल्क व बाक़ी राशि";
+    ? "Doctor App — कुल मरीज़, कतार व Present/Absent"
+    : "Reception App — कतार, Cash Deposit व शुल्क हिसाब";
 
   return `<!doctype html>
 <html lang="hi">
@@ -794,7 +835,7 @@ function renderStandaloneAppHtml(appRole) {
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       background: var(--bg);
       color: var(--text);
-      padding-bottom: 32px;
+      padding-bottom: 36px;
     }
     .lock-wrap {
       min-height: 100dvh;
@@ -828,8 +869,8 @@ function renderStandaloneAppHtml(appRole) {
     .btn {
       border: none;
       border-radius: 12px;
-      padding: 12px 14px;
-      font-size: 14px;
+      padding: 11px 13px;
+      font-size: 13.5px;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
@@ -842,6 +883,7 @@ function renderStandaloneAppHtml(appRole) {
     .btn-live { background: #137333; color: #fff; flex: 1; }
     .btn-done { background: #3730a3; color: #fff; flex: 1; }
     .btn-wait { background: #b45309; color: #fff; flex: 1; }
+    .btn-cash { background: #0f766e; color: #fff; width: 100%; margin-top: 8px; }
     .btn-ghost { background: #eef2f7; color: var(--text); }
 
     .topbar {
@@ -888,7 +930,7 @@ function renderStandaloneAppHtml(appRole) {
       flex-wrap: wrap;
     }
     .banner-big { font-size: 20px; font-weight: 800; }
-    .banner-small { font-size: 11px; opacity: 0.9; text-transform: uppercase; }
+    .banner-small { font-size: 11px; opacity: 0.92; text-transform: uppercase; }
 
     .q-card {
       background: var(--card);
@@ -903,6 +945,7 @@ function renderStandaloneAppHtml(appRole) {
       justify-content: space-between;
       align-items: center;
       margin-bottom: 6px;
+      gap: 8px;
     }
     .token-pill {
       font-weight: 800;
@@ -914,6 +957,7 @@ function renderStandaloneAppHtml(appRole) {
       border-radius: 999px;
       font-size: 12px;
       font-weight: 700;
+      white-space: nowrap;
     }
     .b-waiting { background: var(--wait); color: var(--wait-t); }
     .b-in-consultation { background: var(--live); color: var(--live-t); }
@@ -928,6 +972,8 @@ function renderStandaloneAppHtml(appRole) {
       padding: 10px 0;
       border-top: 1px dashed var(--border);
       font-size: 13px;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .chip {
       padding: 6px 10px;
@@ -953,6 +999,8 @@ function renderStandaloneAppHtml(appRole) {
       font-size: 13px;
       z-index: 50;
       display: none;
+      max-width: 92vw;
+      text-align: center;
     }
   </style>
 </head>
@@ -989,18 +1037,36 @@ function renderStandaloneAppHtml(appRole) {
         <button class="btn btn-ghost" onclick="clearDateFilter()">सब तारीख</button>
       </div>
 
-      <div class="banner">
-        <div>
-          <div class="banner-small">CURRENT RUNNING TOKEN</div>
-          <div id="currentTokenText" class="banner-big">—</div>
-        </div>
-        <div style="text-align:right;">
-          <div class="banner-small">WAITING PATIENTS</div>
-          <div id="waitingCountText" class="banner-big">0</div>
-        </div>
-        ${
-          !isDoctor
-            ? `<div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
+      ${
+        isDoctor
+          ? `<div class="banner">
+              <div>
+                <div class="banner-small">CURRENT RUNNING TOKEN</div>
+                <div id="currentTokenText" class="banner-big">—</div>
+              </div>
+              <div>
+                <div class="banner-small">WAITING</div>
+                <div id="waitingCountText" class="banner-big">0</div>
+              </div>
+              <div style="text-align:right;">
+                <div class="banner-small">TOTAL PATIENTS</div>
+                <div id="totalPatientsText" class="banner-big">0</div>
+              </div>
+            </div>`
+          : `<div class="banner">
+              <div>
+                <div class="banner-small">CURRENT RUNNING TOKEN</div>
+                <div id="currentTokenText" class="banner-big">—</div>
+              </div>
+              <div>
+                <div class="banner-small">WAITING</div>
+                <div id="waitingCountText" class="banner-big">0</div>
+              </div>
+              <div style="text-align:right;">
+                <div class="banner-small">TOTAL PATIENTS</div>
+                <div id="totalPatientsText" class="banner-big">0</div>
+              </div>
+              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
                 <div>
                   <div class="banner-small">कुल दिया गया (PAID)</div>
                   <div id="totalPaidText" class="banner-big">₹0</div>
@@ -1009,10 +1075,9 @@ function renderStandaloneAppHtml(appRole) {
                   <div class="banner-small">कुल बाक़ी (BALANCE)</div>
                   <div id="totalBalanceText" class="banner-big">₹0</div>
                 </div>
-              </div>`
-            : ``
-        }
-      </div>
+              </div>
+            </div>`
+      }
 
       <div id="mainContent"></div>
     </div>
@@ -1038,7 +1103,7 @@ function renderStandaloneAppHtml(appRole) {
       el.textContent = msg;
       el.style.display = "block";
       clearTimeout(window._t);
-      window._t = setTimeout(() => { el.style.display = "none"; }, 3000);
+      window._t = setTimeout(() => { el.style.display = "none"; }, 3200);
     }
 
     function clearDateFilter() {
@@ -1061,7 +1126,7 @@ function renderStandaloneAppHtml(appRole) {
       PIN = pin;
       document.getElementById("lockScreen").style.display = "none";
       document.getElementById("appShell").style.display = "block";
-      document.getElementById("dateFilter").value = d.today || "";
+      document.getElementById("dateFilter").value = "";
       await loadAllData();
     }
 
@@ -1119,10 +1184,41 @@ function renderStandaloneAppHtml(appRole) {
       }
       state.bookings = d.bookings || state.bookings;
       if (d.notified2AheadToken) {
-        showToast(\`✅ \${tokenId} → \${queueStatus} | 2 नंबर पहले अलर्ट भेजा गया: \${d.notified2AheadToken}\`);
+        showToast(\`✅ \${tokenId} → \${queueStatus} | 2 नंबर अलर्ट: \${d.notified2AheadToken}\`);
       } else {
         showToast(\`✅ \${tokenId} → \${queueStatus}\`);
       }
+      renderView();
+    }
+
+    async function handleCashDeposit(tokenId, currentBalance) {
+      const defaultAmt = currentBalance > 0 ? String(currentBalance) : "";
+      const entered = prompt(\`टोकन \${tokenId} के लिए Cash Deposit राशि (₹) डालें (बाक़ी: ₹\${currentBalance}):\`, defaultAmt);
+      if (entered === null) return;
+      const amt = Number(String(entered).trim());
+      if (!Number.isFinite(amt) || amt <= 0) {
+        showToast("कृपया सही राशि (₹) डालें");
+        return;
+      }
+
+      const r = await fetch("/api/app/cash-deposit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
+        body: JSON.stringify({
+          sheetId: state.clinic?.sheetId,
+          tokenId,
+          amount: amt,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        showToast(d.error || "Cash deposit failed");
+        return;
+      }
+      if (Array.isArray(d.bookings) && d.bookings.length) {
+        state.bookings = d.bookings;
+      }
+      showToast(\`💵 \${tokenId} में ₹\${amt} Cash Deposit दर्ज हुआ\`);
       renderView();
     }
 
@@ -1169,6 +1265,7 @@ function renderStandaloneAppHtml(appRole) {
       document.getElementById("currentTokenText").textContent =
         running ? \`\${running.Token_ID} (\${running.Patient_Name})\` : "कोई नहीं / None";
       document.getElementById("waitingCountText").textContent = String(waitingList.length);
+      document.getElementById("totalPatientsText").textContent = String(list.length);
 
       if (APP_ROLE === "reception") {
         let sumPaid = 0;
@@ -1193,11 +1290,11 @@ function renderStandaloneAppHtml(appRole) {
           ? state.doctors
           : state.doctors.filter((d) => d.name === docVal);
 
-        html += \`<div class="q-card"><b>🩺 Doctor Availability Toggle (P = Present, A = Off)</b>\`;
+        html += \`<div class="q-card"><b>🩺 Doctor Availability (P = Present, A = Absent)</b>\`;
         docsToShow.forEach((doc) => {
           html += \`
             <div class="avail-row">
-              <div><b>\${doc.name}</b><br><span style="color:#525252;font-size:12px;">\${doc.specialty}</span></div>
+              <div><b>\${doc.name}</b><br><span style="color:#525252;font-size:12px;">\${doc.specialty || ""}</span></div>
               <div style="display:flex;gap:6px;">
                 <button class="chip \${doc.todayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "today")'>आज: \${doc.todayAvail || 'P'}</button>
                 <button class="chip \${doc.nextDayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "next")'>कल: \${doc.nextDayAvail || 'P'}</button>
@@ -1224,8 +1321,12 @@ function renderStandaloneAppHtml(appRole) {
           const paidAmt = Number(b.Paid_Amount || 0);
           const balanceAmt = Math.max(0, opdFee - paidAmt);
 
-          const feeLine = APP_ROLE === "reception"
-            ? \`<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
+          const metaLine = APP_ROLE === "reception"
+            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
+            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""}\`;
+
+          const cashBtnHtml = APP_ROLE === "reception"
+            ? \`<button class="btn btn-cash" onclick="handleCashDeposit('\${tId}', \${balanceAmt})">💵 Cash Deposit (बाक़ी: ₹\${balanceAmt})</button>\`
             : "";
 
           html += \`
@@ -1234,15 +1335,13 @@ function renderStandaloneAppHtml(appRole) {
                 <span class="token-pill">\${tId} — \${b.Patient_Name || ""} (\${b.Patient_Age || ""}y)</span>
                 <span class="badge \${cls}">\${st}</span>
               </div>
-              <div class="q-meta">
-                👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>
-                📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}\${feeLine}
-              </div>
+              <div class="q-meta">\${metaLine}</div>
               <div class="q-actions">
                 <button class="btn btn-live" onclick="setQueueStatus('\${tId}', 'In Consultation')">▶ In Consultation</button>
                 <button class="btn btn-done" onclick="setQueueStatus('\${tId}', 'Completed')">✔ Completed</button>
                 <button class="btn btn-wait" onclick="setQueueStatus('\${tId}', 'Waiting')">⏳ Waiting</button>
               </div>
+              \${cashBtnHtml}
             </div>
           \`;
         });
@@ -1381,7 +1480,11 @@ app.post("/webhook/whatsapp", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
+const PORT = Number(process.env.PORT || 10000);
+const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`AR Enterprises OPD Engine running on ${PORT}`);
+});
+
+server.on("error", (err) => {
+  console.error("HTTP Server Error:", err.code || err.message);
 });
