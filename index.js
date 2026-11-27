@@ -804,8 +804,8 @@ function renderStandaloneAppHtml(appRole) {
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
   const subtitleText = isDoctor
-    ? "Doctor App — कुल मरीज़, कतार व Present/Absent"
-    : "Reception App — कतार, Cash Deposit व शुल्क हिसाब";
+    ? "Doctor App — कुल मरीज़, कुल राशि, कतार व Present/Absent"
+    : "Reception App — कतार, Cash Deposit व कुल शुल्क हिसाब";
 
   return `<!doctype html>
 <html lang="hi">
@@ -1052,6 +1052,12 @@ function renderStandaloneAppHtml(appRole) {
                 <div class="banner-small">TOTAL PATIENTS</div>
                 <div id="totalPatientsText" class="banner-big">0</div>
               </div>
+              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
+                <div>
+                  <div class="banner-small">TOTAL AMOUNT (कुल शुल्क)</div>
+                  <div id="totalAmountText" class="banner-big">₹0</div>
+                </div>
+              </div>
             </div>`
           : `<div class="banner">
               <div>
@@ -1066,7 +1072,11 @@ function renderStandaloneAppHtml(appRole) {
                 <div class="banner-small">TOTAL PATIENTS</div>
                 <div id="totalPatientsText" class="banner-big">0</div>
               </div>
-              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
+              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                <div>
+                  <div class="banner-small">TOTAL AMOUNT (कुल शुल्क)</div>
+                  <div id="totalAmountText" class="banner-big">₹0</div>
+                </div>
                 <div>
                   <div class="banner-small">कुल दिया गया (PAID)</div>
                   <div id="totalPaidText" class="banner-big">₹0</div>
@@ -1262,20 +1272,26 @@ function renderStandaloneAppHtml(appRole) {
         (b) => String(b.Queue_Status || "Waiting").trim().toLowerCase() === "waiting"
       );
 
+      let sumTotal = 0;
+      let sumPaid = 0;
+      let sumBalance = 0;
+      list.forEach((b) => {
+        const fee = Number(b.OPD_Fee || 0);
+        const paid = Number(b.Paid_Amount || 0);
+        sumTotal += fee;
+        sumPaid += paid;
+        sumBalance += Math.max(0, fee - paid);
+      });
+
       document.getElementById("currentTokenText").textContent =
         running ? \`\${running.Token_ID} (\${running.Patient_Name})\` : "कोई नहीं / None";
       document.getElementById("waitingCountText").textContent = String(waitingList.length);
       document.getElementById("totalPatientsText").textContent = String(list.length);
 
+      const totEl = document.getElementById("totalAmountText");
+      if (totEl) totEl.textContent = \`₹\${sumTotal}\`;
+
       if (APP_ROLE === "reception") {
-        let sumPaid = 0;
-        let sumBalance = 0;
-        list.forEach((b) => {
-          const fee = Number(b.OPD_Fee || 0);
-          const paid = Number(b.Paid_Amount || 0);
-          sumPaid += paid;
-          sumBalance += Math.max(0, fee - paid);
-        });
         const paidEl = document.getElementById("totalPaidText");
         const balEl = document.getElementById("totalBalanceText");
         if (paidEl) paidEl.textContent = \`₹\${sumPaid}\`;
@@ -1323,7 +1339,7 @@ function renderStandaloneAppHtml(appRole) {
 
           const metaLine = APP_ROLE === "reception"
             ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
-            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""}\`;
+            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Fee: <b>₹\${opdFee}</b>\`;
 
           const cashBtnHtml = APP_ROLE === "reception"
             ? \`<button class="btn btn-cash" onclick="handleCashDeposit('\${tId}', \${balanceAmt})">💵 Cash Deposit (बाक़ी: ₹\${balanceAmt})</button>\`
