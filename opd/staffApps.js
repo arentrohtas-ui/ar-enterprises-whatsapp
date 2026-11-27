@@ -62,17 +62,17 @@ async function findBookingByTokenId(callGas, sheetId, tokenId) {
   }
 }
 
-function findClientForOpd(clients = [], { opdId = "", sheetId = "" } = {}) {
-  const cleanOpdId = String(opdId || "").trim().toLowerCase();
+function findClientByBusinessId(clients = [], { businessId = "", sheetId = "" } = {}) {
+  const cleanBizId = String(businessId || "").trim().toLowerCase();
   const cleanSheetId = String(sheetId || "").trim();
 
-  if (cleanOpdId) {
-    const byOpd = clients.find(
+  if (cleanBizId) {
+    const exactMatch = clients.find(
       (c) =>
-        String(c.opdId || "").trim().toLowerCase() === cleanOpdId ||
-        String(c.id || "").trim().toLowerCase() === cleanOpdId
+        String(c.id || "").trim().toLowerCase() === cleanBizId ||
+        String(c.opdId || "").trim().toLowerCase() === cleanBizId
     );
-    if (byOpd) return byOpd;
+    if (exactMatch) return exactMatch;
   }
 
   if (cleanSheetId) {
@@ -82,11 +82,15 @@ function findClientForOpd(clients = [], { opdId = "", sheetId = "" } = {}) {
     if (bySheet) return bySheet;
   }
 
+  if (cleanBizId) {
+    return null;
+  }
+
   return (
     clients.find((c) => String(c.category || "opd").toLowerCase() === "opd") ||
     clients[0] || {
       id: "",
-      opdId: cleanOpdId || "OPD_DEFAULT",
+      opdId: "",
       name: "OPD Clinic",
       sheetId: cleanSheetId || process.env.DEFAULT_CLINIC_SHEET_ID || "",
       doctorPin: process.env.STAFF_APP_PIN || "1234",
@@ -110,7 +114,7 @@ function getExpectedPinForRole(client, role, fallbackPin) {
   ).trim();
 }
 
-function renderStandaloneAppHtml(appRole, opdId = "") {
+function renderStandaloneAppHtml(appRole, businessId = "") {
   const isDoctor = appRole === "doctor";
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
@@ -124,7 +128,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>${pageTitle}${opdId ? ` (${opdId})` : ""}</title>
+  <title>${pageTitle}${businessId ? ` (${businessId})` : ""}</title>
   <style>
     :root {
       --bg: #f3f6fb;
@@ -326,7 +330,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
   <div id="lockScreen" class="lock-wrap">
     <div class="lock-card">
       <h2>🔐 ${headerIcon} ${pageTitle}</h2>
-      <p>${opdId ? `OPD ID: <b>${opdId}</b> — ` : ""}${pageTitle} का PIN डालें</p>
+      <p>${businessId ? `Business ID: <b>${businessId}</b> — ` : ""}${pageTitle} का PIN डालें</p>
       <input id="pinInput" class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="••••" />
       <button class="btn btn-primary" onclick="unlockApp()">Unlock ${pageTitle}</button>
     </div>
@@ -411,7 +415,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
 
   <script>
     const APP_ROLE = "${appRole}";
-    const OPD_ID = "${opdId}";
+    const BUSINESS_ID = "${businessId}";
     const TODAY_IST = "${todayIst}";
     let PIN = "";
     let state = { clinic: null, doctors: [], bookings: [] };
@@ -446,7 +450,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
 
     function buildQuery() {
       const params = new URLSearchParams();
-      if (OPD_ID) params.set("opdId", OPD_ID);
+      if (BUSINESS_ID) params.set("businessId", BUSINESS_ID);
       if (APP_ROLE) params.set("role", APP_ROLE);
       if (state.clinic?.sheetId) params.set("sheetId", state.clinic.sheetId);
       const q = params.toString();
@@ -458,7 +462,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
       const r = await fetch("/api/app/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, opdId: OPD_ID, role: APP_ROLE }),
+        body: JSON.stringify({ pin, businessId: BUSINESS_ID, role: APP_ROLE }),
       });
       const d = await r.json();
       if (!r.ok || !d.ok) {
@@ -520,7 +524,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          opdId: OPD_ID || state.clinic?.opdId,
+          businessId: BUSINESS_ID || state.clinic?.id,
           role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           tokenId,
@@ -560,7 +564,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          opdId: OPD_ID || state.clinic?.opdId,
+          businessId: BUSINESS_ID || state.clinic?.id,
           role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           tokenId,
@@ -586,7 +590,7 @@ function renderStandaloneAppHtml(appRole, opdId = "") {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          opdId: OPD_ID || state.clinic?.opdId,
+          businessId: BUSINESS_ID || state.clinic?.id,
           role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           doctorId: doc.id,
@@ -742,8 +746,13 @@ function registerOpdStaffAppRoutes(app, deps) {
     ).trim();
     if (!pin) return { ok: false, error: "PIN आवश्यक है" };
 
-    const opdId = String(
-      req.body?.opdId || req.query.opdId || req.headers["x-opd-id"] || ""
+    const businessId = String(
+      req.body?.businessId ||
+        req.body?.opdId ||
+        req.query.businessId ||
+        req.query.opdId ||
+        req.headers["x-business-id"] ||
+        ""
     ).trim();
     const sheetId = String(
       req.body?.sheetId || req.query.sheetId || ""
@@ -757,9 +766,15 @@ function registerOpdStaffAppRoutes(app, deps) {
       clients = await getActiveClients();
     } catch (_) {}
 
-    const targetClient = findClientForOpd(clients, { opdId, sheetId });
-    const validPin = getExpectedPinForRole(targetClient, role, staffAppPin);
+    const targetClient = findClientByBusinessId(clients, {
+      businessId,
+      sheetId,
+    });
+    if (!targetClient) {
+      return { ok: false, error: "Business ID नहीं मिली" };
+    }
 
+    const validPin = getExpectedPinForRole(targetClient, role, staffAppPin);
     if (pin !== validPin) {
       return { ok: false, error: "गलत PIN / Invalid PIN" };
     }
@@ -774,7 +789,7 @@ function registerOpdStaffAppRoutes(app, deps) {
     return res.status(200).json({
       ok: true,
       today: getTodayIstYmd(),
-      opdId: check.client?.opdId || "",
+      businessId: check.client?.id || "",
     });
   });
 
@@ -793,7 +808,6 @@ function registerOpdStaffAppRoutes(app, deps) {
           today: getTodayIstYmd(),
           clients: clients.map((c) => ({
             id: c.id,
-            opdId: c.opdId,
             name: c.name,
             sheetId: c.sheetId,
           })),
@@ -814,13 +828,11 @@ function registerOpdStaffAppRoutes(app, deps) {
         today: getTodayIstYmd(),
         clients: clients.map((c) => ({
           id: c.id,
-          opdId: c.opdId,
           name: c.name,
           sheetId: c.sheetId,
         })),
         clinic: {
           id: activeClient.id,
-          opdId: activeClient.opdId,
           name: activeClient.name,
           sheetId: activeClient.sheetId,
         },
@@ -988,27 +1000,29 @@ function registerOpdStaffAppRoutes(app, deps) {
 
   app.get("/reception-app", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("reception", req.query.opdId || ""));
+    res.send(renderStandaloneAppHtml("reception", req.query.businessId || req.query.opdId || ""));
   });
 
-  app.get("/reception-app/:opdId", (req, res) => {
+  app.get("/reception-app/:businessId", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("reception", req.params.opdId || ""));
+    res.send(renderStandaloneAppHtml("reception", req.params.businessId || ""));
   });
 
   app.get("/doctor-app", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("doctor", req.query.opdId || ""));
+    res.send(renderStandaloneAppHtml("doctor", req.query.businessId || req.query.opdId || ""));
   });
 
-  app.get("/doctor-app/:opdId", (req, res) => {
+  app.get("/doctor-app/:businessId", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("doctor", req.params.opdId || ""));
+    res.send(renderStandaloneAppHtml("doctor", req.params.businessId || ""));
   });
 
   app.get("/app", (req, res) => {
-    const opdId = String(req.query.opdId || "").trim();
-    res.redirect(opdId ? `/reception-app/${encodeURIComponent(opdId)}` : "/reception-app");
+    const bizId = String(req.query.businessId || req.query.opdId || "").trim();
+    res.redirect(
+      bizId ? `/reception-app/${encodeURIComponent(bizId)}` : "/reception-app"
+    );
   });
 }
 
