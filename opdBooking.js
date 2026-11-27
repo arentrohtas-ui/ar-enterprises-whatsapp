@@ -62,8 +62,24 @@ function parseBatches(rawBatch) {
   return parts.length ? parts : ["Morning (09:00 AM - 01:00 PM)"];
 }
 
+function getClientSheetId(ctx) {
+  return String(
+    ctx.business?.sheetId ||
+      ctx.business?.clientSheetId ||
+      ctx.business?.Client_Sheet_ID ||
+      ctx.business?.spreadsheetId ||
+      ""
+  ).trim();
+}
+
 async function loadDoctors(ctx) {
-  const res = await ctx.getSheet({ action: "get_doctors" });
+  const spreadsheetId = getClientSheetId(ctx);
+  const res = await ctx.getSheet({
+    action: "get_doctors",
+    spreadsheetId,
+    spreadsheet_id: spreadsheetId,
+  });
+
   const rawList = Array.isArray(res?.doctors)
     ? res.doctors
     : Array.isArray(res?.data)
@@ -171,13 +187,14 @@ async function finalizeBooking(ctx, lang, sessionData) {
     doc.advanceAmount ?? ctx.business?.advanceAmount ?? 0
   );
 
-  // क्लाइंट के पास अपनी Cashfree API key है या नहीं
-  const hasClientGateway = Boolean(
-    String(ctx.business?.cashfreeAppId || "").trim() &&
-      String(ctx.business?.cashfreeSecretKey || "").trim()
-  );
+  const cashfreeAppId = String(
+    ctx.business?.cashfreeAppId || ctx.business?.Cashfree_App_ID || ""
+  ).trim();
+  const cashfreeSecretKey = String(
+    ctx.business?.cashfreeSecretKey || ctx.business?.Cashfree_Secret_Key || ""
+  ).trim();
+  const hasClientGateway = Boolean(cashfreeAppId && cashfreeSecretKey);
 
-  // अपनी API key न होने पर ऑनलाइन एडवांस 0 और पूरा भुगतान काउंटर पर
   const advanceFee = hasClientGateway ? rawAdvance : 0;
 
   const patientName = sessionData.patientName;
@@ -187,20 +204,33 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const dayLabel = sessionData.dayInfo?.shortLabel || "";
   const batchSlot = sessionData.batchSlot;
   const bizName = ctx.business?.name || "OPD Clinic";
+  const spreadsheetId = getClientSheetId(ctx);
 
   let payLink = null;
-  if (advanceFee > 0 && typeof ctx.createRazorpayLink === "function") {
-    payLink = await ctx.createRazorpayLink({
+  if (advanceFee > 0) {
+    const linkPayload = {
       amountInRupees: advanceFee,
       tokenId,
       patientName,
       phone: patientPhone,
       description: `${bizName} - Advance for ${patientName} (${tokenId})`,
-    });
+      cashfreeAppId,
+      cashfreeSecretKey,
+    };
+
+    if (typeof ctx.createCashfreeLink === "function") {
+      payLink = await ctx.createCashfreeLink(linkPayload);
+    } else if (typeof ctx.createPaymentLink === "function") {
+      payLink = await ctx.createPaymentLink(linkPayload);
+    } else if (typeof ctx.createRazorpayLink === "function") {
+      payLink = await ctx.createRazorpayLink(linkPayload);
+    }
   }
 
   await ctx.postSheet({
     action: "create_booking",
+    spreadsheetId,
+    spreadsheet_id: spreadsheetId,
     tokenId,
     patientName,
     patientAge,
@@ -215,7 +245,7 @@ async function finalizeBooking(ctx, lang, sessionData) {
     queueStatus: "Waiting",
     paymentStatus: advanceFee > 0 ? "Pending Advance" : "Pay at Counter",
     greetingSent: "Yes",
-    paymentLinkId: payLink?.id || "",
+    paymentLinkId: payLink?.id || payLink?.link_id || "",
   });
 
   ctx.clearSession(true);
@@ -243,11 +273,12 @@ async function finalizeBooking(ctx, lang, sessionData) {
         `• दिन व बैच: *${dayText}* | *${batchSlot}*\n` +
         `• OPD फ़ीस: ₹${opdFee} | ऑनलाइन एडवांस: ₹${advanceFee}`);
 
-  if (payLink?.shortUrl) {
+  const paymentUrl = payLink?.shortUrl || payLink?.link_url || payLink?.url || "";
+  if (paymentUrl) {
     confirmText +=
       lang === "en"
-        ? `\n\n💳 *Pay Advance Online:* ${payLink.shortUrl}`
-        : `\n\n💳 *ऑनलाइन एडवांस पेमेंट लिंक:* ${payLink.shortUrl}`;
+        ? `\n\n💳 *Pay Advance Online:* ${paymentUrl}`
+        : `\n\n💳 *ऑनलाइन एडवांस पेमेंट लिंक:* ${paymentUrl}`;
   } else if (!hasClientGateway) {
     confirmText +=
       lang === "en"
@@ -265,8 +296,11 @@ async function finalizeBooking(ctx, lang, sessionData) {
 
 async function handleLiveQueue(ctx, lang, queryText) {
   const cleanQuery = String(queryText || "").trim();
+  const spreadsheetId = getClientSheetId(ctx);
   const res = await ctx.getSheet({
     action: "get_live_status",
+    spreadsheetId,
+    spreadsheet_id: spreadsheetId,
     tokenId: cleanQuery.toUpperCase() === "ALL" ? "" : cleanQuery,
     phone: ctx.from || "",
   });
@@ -350,7 +384,13 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       return;
     }
 
-    if (text === "1" || id === "book_opd" || ["hi", "hello", "namaste", "नमस्ते", "book", "opd"].some((w) => text.toLowerCase().includes(w))) {
+    if (
+      text === "1" ||
+      id === "book_opd" ||
+      ["hi", "hello", "namaste", "नमस्ते", "book", "opd"].some((w) =>
+        text.toLowerCase().includes(w)
+      )
+    ) {
       const doctors = await loadDoctors(ctx);
       ctx.setSession({
         lang,
