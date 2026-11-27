@@ -578,6 +578,7 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
   }
 
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+  const balanceAmount = Math.max(0, opdFee - payableAmount);
 
   let msg =
     lang === "en"
@@ -587,22 +588,28 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
         `• Date: *${dayText}*\n` +
         `• Doctor: *${doc.name}*\n` +
         `• Time Slot: *${batchSlot}*\n` +
-        `• Amount to Pay: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n\n`
+        `• Online Advance: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• Remaining Balance: *₹${balanceAmount}* (Pay in Cash at Counter)\n\n`
+          : `\n`)
       : `💳 *टोकन जारी होने से पहले पेमेंट आवश्यक है*\n\n` +
         `• मरीज़: *${patientName}* (${patientAge} वर्ष)\n` +
         `• मोबाइल: *${patientPhone}*\n` +
         `• तारीख: *${dayText}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
         `• समय स्लॉट: *${batchSlot}*\n` +
-        `• देय राशि: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n\n`;
+        `• ऑनलाइन एडवांस: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• शेष राशि: *₹${balanceAmount}* (क्लिनिक काउंटर पर नकद जमा करें)\n\n`
+          : `\n`);
 
   if (paymentUrl) {
     msg +=
       lang === "en"
         ? `🔗 *Cashfree Payment Link:*\n${paymentUrl}\n\n` +
-          `_Complete the payment first, then tap *Check Payment* below._`
+          `_Complete the online payment first, then tap *Check Payment* below._`
         : `🔗 *Cashfree पेमेंट लिंक:*\n${paymentUrl}\n\n` +
-          `_पहले पेमेंट पूरा करें, फिर नीचे *Check Payment* बटन दबाएं।_`;
+          `_पहले ऑनलाइन पेमेंट पूरा करें, फिर नीचे *Check Payment* बटन दबाएं।_`;
   } else {
     msg +=
       lang === "en"
@@ -695,6 +702,7 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
   const doc = pendingData.selectedDoctor || {};
   const opdFee = Number(doc.opdFee ?? pendingData.opdFee ?? 0);
   const payableAmount = Number(pendingData.payableAmount ?? opdFee);
+  const balanceAmount = Math.max(0, opdFee - payableAmount);
   const patientName = pendingData.patientName;
   const patientAge = pendingData.patientAge;
   const patientPhone = pendingData.patientPhone;
@@ -730,6 +738,18 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
       paymentLinkId: paymentOrderId,
       paymentRefId,
     });
+
+    await ctx.postSheet({
+      action: "mark_payment_paid",
+      spreadsheetId,
+      spreadsheet_id: spreadsheetId,
+      tokenId,
+      patientName,
+      patientPhone,
+      paidAmount: payableAmount,
+      paymentRefId,
+      cfPaymentId: paymentRefId,
+    });
   }
 
   ctx.clearSession(true);
@@ -741,6 +761,24 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
 
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
 
+  const cashInstruction =
+    balanceAmount > 0
+      ? lang === "en"
+        ? `• Remaining fee *₹${balanceAmount}* must be paid in *cash at the clinic counter*.\n`
+        : `• शेष राशि *₹${balanceAmount}* *क्लिनिक काउंटर पर नकद (Cash)* जमा करनी होगी।\n`
+      : "";
+
+  const instructionText =
+    lang === "en"
+      ? `\n\n📌 *Important Instructions:*\n` +
+        `• Please arrive on time for your slot (*${batchSlot}*).\n` +
+        `• Please carry your *old prescription / previous slip & reports* (if any) with you.\n` +
+        cashInstruction
+      : `\n\n📌 *ज़रूरी निर्देश:*\n` +
+        `• कृपया अपने निर्धारित समय (*${batchSlot}*) पर सही समय से क्लिनिक पहुँचें।\n` +
+        `• कृपया अपनी *पुरानी पर्चा / पिछली पर्ची व पुरानी रिपोर्ट* (यदि हो तो) अवश्य साथ रखें।\n` +
+        cashInstruction;
+
   const msg =
     `${greetingText}\n\n` +
     (lang === "en"
@@ -751,7 +789,10 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
         `• Date: *${dayText}*\n` +
         `• Doctor: *${doc.name}*\n` +
         `• Time Slot: *${batchSlot}*\n` +
-        `• Paid Amount: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n` +
+        `• Paid Online: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• Balance at Counter (Cash): *₹${balanceAmount}*\n`
+          : ``) +
         `• Payment Status: *Paid*`
       : `🎫 *OPD टोकन कन्फ़र्म*\n` +
         `• टोकन नंबर: *${tokenId}*\n` +
@@ -760,21 +801,14 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
         `• तारीख: *${dayText}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
         `• समय स्लॉट: *${batchSlot}*\n` +
-        `• भुगतान राशि: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n` +
-        `• पेमेंट स्टेटस: *Paid*`);
+        `• ऑनलाइन भुगतान: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• काउंटर पर शेष राशि (नकद): *₹${balanceAmount}*\n`
+          : ``) +
+        `• पेमेंट स्टेटस: *Paid*`) +
+    instructionText.trimEnd();
 
-  await sendButtonsMessage(ctx, {
-    headerText: lang === "en" ? "Token Confirmed" : "टोकन कन्फ़र्म",
-    bodyText: msg,
-    buttons: [
-      { id: "live_queue", title: "Track Token" },
-      { id: "book_opd", title: "Book OPD" },
-      {
-        id: "back_menu",
-        title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
-      },
-    ],
-  });
+  await ctx.sendText(msg);
 }
 
 async function handleLiveQueue(ctx, lang, queryText) {
