@@ -13,6 +13,45 @@ function normalizeTenDigitPhone(phone) {
   return digits;
 }
 
+async function sendPaymentActionButtons(ctx, promptText, lang = "hi") {
+  if (typeof ctx.sendWA === "function") {
+    const waRes = await ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: promptText },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: "PAY_CHECK",
+                title: lang === "en" ? "Payment Done" : "पेमेंट हो गया",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: "PAY_CANCEL",
+                title: lang === "en" ? "Cancel" : "रद्द करें",
+              },
+            },
+          ],
+        },
+      },
+    });
+    if (waRes && !waRes.error && !waRes.errors) return;
+  }
+
+  await ctx.sendText(
+    `${promptText}\n${
+      lang === "en"
+        ? "(Reply *1* for Payment Done or *0* to Cancel)"
+        : "(पेमेंट हो गया के लिए *1* या रद्द करने के लिए *0* लिखें)"
+    }`
+  );
+}
+
 async function sendPaymentLinkAndButtons(
   ctx,
   { bookingPayload, payUrl, payableAmount },
@@ -41,42 +80,7 @@ async function sendPaymentLinkAndButtons(
       ? "Once payment is done, tap *Payment Done* to generate your token, or *Cancel* to stop."
       : "पेमेंट होने के बाद टोकन जारी करने के लिए *पेमेंट हो गया* दबाएं, या *रद्द करें* दबाएं।";
 
-  if (typeof ctx.sendWA === "function") {
-    const waRes = await ctx.sendWA({
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: actionText },
-        action: {
-          buttons: [
-            {
-              type: "reply",
-              reply: {
-                id: "PAY_CHECK",
-                title: lang === "en" ? "Payment Done" : "पेमेंट हो गया",
-              },
-            },
-            {
-              type: "reply",
-              reply: {
-                id: "PAY_CANCEL",
-                title: lang === "en" ? "Cancel" : "रद्द करें",
-              },
-            },
-          ],
-        },
-      },
-    });
-    if (waRes && !waRes.error && !waRes.errors) return;
-  }
-
-  await ctx.sendText(
-    `${actionText}\n${
-      lang === "en"
-        ? "(Reply *1* for Payment Done or *0* to Cancel)"
-        : "(पेमेंट हो गया के लिए *1* या रद्द करने के लिए *0* लिखें)"
-    }`
-  );
+  await sendPaymentActionButtons(ctx, actionText, lang);
 }
 
 async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
@@ -289,15 +293,12 @@ async function handleAwaitPaymentStep(
     }
   }
 
-  await sendPaymentLinkAndButtons(
-    ctx,
-    {
-      bookingPayload: data,
-      payUrl: data.payUrl || "",
-      payableAmount: data.payableAmount || data.opdFee || 0,
-    },
-    lang
-  );
+  const retryMsg =
+    lang === "en"
+      ? "⚠️ Payment has not been completed yet. Please complete the payment first and try again."
+      : "⚠️ आपका भुगतान अभी पूरा नहीं हुआ है। कृपया पहले भुगतान करें और फिर दोबारा ट्राई करें।";
+
+  await sendPaymentActionButtons(ctx, retryMsg, lang);
 }
 
 module.exports = {
