@@ -135,7 +135,10 @@ async function sendButtonsMessage(ctx, { headerText, bodyText, footerText, butto
   await ctx.sendText(bodyText);
 }
 
-async function sendListMessage(ctx, { headerText, bodyText, footerText, buttonLabel, rows }) {
+async function sendListMessage(
+  ctx,
+  { headerText, bodyText, footerText, buttonLabel, rows }
+) {
   const safeRows = (rows || []).slice(0, 10).map((r, i) => ({
     id: truncateText(r.id || `row_${i + 1}`, 200),
     title: truncateText(r.title, 24),
