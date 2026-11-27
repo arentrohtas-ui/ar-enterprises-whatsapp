@@ -527,16 +527,17 @@ async function handleOpdMessage(ctx, text = "", btnId = "") {
   const lower = cleanText.toLowerCase();
 
   if (
-    cleanId === "MENU_LANG" ||
-    (!session.step && cleanText === "3") ||
-    lower === "english" ||
-    lower === "hindi" ||
-    lower === "हिंदी"
+    !session.step &&
+    (cleanId === "MENU_LANG" ||
+      cleanText === "3" ||
+      lower === "english" ||
+      lower === "hindi" ||
+      lower === "हिंदी")
   ) {
-    if (lower === "english" || cleanId === "MENU_LANG") {
-      lang = lang === "hi" ? "en" : "hi";
-    } else if (lower === "hindi" || lower === "हिंदी") {
+    if (lower === "hindi" || lower === "हिंदी") {
       lang = "hi";
+    } else if (lower === "english") {
+      lang = "en";
     } else {
       lang = lang === "hi" ? "en" : "hi";
     }
@@ -546,6 +547,7 @@ async function handleOpdMessage(ctx, text = "", btnId = "") {
   }
 
   if (
+    !session.step &&
     ["hi", "hello", "hey", "नमस्ते", "namaste", "start", "menu", "0"].includes(
       lower
     )
@@ -556,20 +558,22 @@ async function handleOpdMessage(ctx, text = "", btnId = "") {
   }
 
   if (
-    cleanId === "MENU_BOOK" ||
-    (!session.step && cleanText === "1") ||
-    lower.includes("book") ||
-    lower.includes("टोकन")
+    !session.step &&
+    (cleanId === "MENU_BOOK" ||
+      cleanText === "1" ||
+      lower.includes("book") ||
+      lower.includes("टोकन"))
   ) {
     await startBookingFlow(ctx, lang);
     return;
   }
 
   if (
-    cleanId === "MENU_STATUS" ||
-    (!session.step && cleanText === "2") ||
-    lower.includes("status") ||
-    lower.includes("स्टेटस")
+    !session.step &&
+    (cleanId === "MENU_STATUS" ||
+      cleanText === "2" ||
+      lower.includes("status") ||
+      lower.includes("स्टेटस"))
   ) {
     await sendLiveQueueStatus(ctx, lang);
     return;
