@@ -62,12 +62,14 @@ async function sendPaymentLinkAndButtons(
     lang === "en"
       ? `💳 *Payment Link Ready*\n\n` +
         `• Patient: *${bookingPayload.patientName}* (${bookingPayload.patientAge} yrs)\n` +
+        `• Mobile: *${bookingPayload.patientPhone}*\n` +
         `• Doctor: *${doc.name}*\n` +
         `• Date: *${bookingPayload.visitDate}* | *${bookingPayload.batchSlot}*\n` +
         `• Amount: *₹${payableAmount}*\n\n` +
         `Pay here:\n${payUrl}`
       : `💳 *पेमेंट लिंक तैयार है*\n\n` +
         `• मरीज़: *${bookingPayload.patientName}* (${bookingPayload.patientAge} वर्ष)\n` +
+        `• मोबाइल: *${bookingPayload.patientPhone}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
         `• तारीख: *${bookingPayload.visitDate}* | *${bookingPayload.batchSlot}*\n` +
         `• राशि: *₹${payableAmount}*\n\n` +
@@ -271,7 +273,7 @@ async function handleAwaitPaymentStep(
           tokenId,
           patientName: data.patientName || "Patient",
           patientAge: data.patientAge || "",
-          patientPhone: normalizeTenDigitPhone(data.patientPhone || ctx.from),
+          patientPhone: normalizeTenDigitPhone(data.patientPhone),
           doctorId: doc.id || "",
           doctorName: doc.name || "",
           visitDate: data.visitDate || "",
