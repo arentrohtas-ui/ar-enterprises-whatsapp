@@ -7,15 +7,91 @@ function toNumberClean(val, fallback = 0) {
   return Number.isFinite(n) && cleaned !== "" ? n : fallback;
 }
 
+function normalizeTenDigitPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length >= 10) return digits.slice(-10);
+  return digits;
+}
+
+async function sendPaymentLinkAndButtons(
+  ctx,
+  { bookingPayload, payUrl, payableAmount },
+  lang = "hi"
+) {
+  const doc = bookingPayload.selectedDoctor || {};
+  const detailsText =
+    lang === "en"
+      ? `💳 *Payment Link Ready*\n\n` +
+        `• Patient: *${bookingPayload.patientName}* (${bookingPayload.patientAge} yrs)\n` +
+        `• Doctor: *${doc.name}*\n` +
+        `• Date: *${bookingPayload.visitDate}* | *${bookingPayload.batchSlot}*\n` +
+        `• Amount: *₹${payableAmount}*\n\n` +
+        `Pay here:\n${payUrl}`
+      : `💳 *पेमेंट लिंक तैयार है*\n\n` +
+        `• मरीज़: *${bookingPayload.patientName}* (${bookingPayload.patientAge} वर्ष)\n` +
+        `• डॉक्टर: *${doc.name}*\n` +
+        `• तारीख: *${bookingPayload.visitDate}* | *${bookingPayload.batchSlot}*\n` +
+        `• राशि: *₹${payableAmount}*\n\n` +
+        `पेमेंट लिंक:\n${payUrl}`;
+
+  await ctx.sendText(detailsText);
+
+  const actionText =
+    lang === "en"
+      ? "Once payment is done, tap *Payment Done* to generate your token, or *Cancel* to stop."
+      : "पेमेंट होने के बाद टोकन जारी करने के लिए *पेमेंट हो गया* दबाएं, या *रद्द करें* दबाएं।";
+
+  if (typeof ctx.sendWA === "function") {
+    const waRes = await ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: actionText },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: "PAY_CHECK",
+                title: lang === "en" ? "Payment Done" : "पेमेंट हो गया",
+              },
+            },
+            {
+              type: "reply",
+              reply: {
+                id: "PAY_CANCEL",
+                title: lang === "en" ? "Cancel" : "रद्द करें",
+              },
+            },
+          ],
+        },
+      },
+    });
+    if (waRes && !waRes.error && !waRes.errors) return;
+  }
+
+  await ctx.sendText(
+    `${actionText}\n${
+      lang === "en"
+        ? "(Reply *1* for Payment Done or *0* to Cancel)"
+        : "(पेमेंट हो गया के लिए *1* या रद्द करने के लिए *0* लिखें)"
+    }`
+  );
+}
+
 async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
   const doc = data.selectedDoctor || {};
-  const opdFee = toNumberClean(doc.opdFee, 0);
+  const opdFee = toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0);
   const advCfg = toNumberClean(
-    doc.advanceAmount || ctx.business?.advanceAmount || 0,
+    doc.advanceAmount ?? ctx.business?.advanceAmount ?? 0,
     0
   );
   const payableAmount =
     advCfg > 0 && advCfg < opdFee ? advCfg : opdFee > 0 ? opdFee : 0;
+
+  const cleanPhone = normalizeTenDigitPhone(tenDigit || data.patientPhone || "");
+  const cleanName = String(data.patientName || "Patient").trim() || "Patient";
+  const cleanAge = String(data.patientAge || "").trim();
 
   const bookingPayload = {
     lang,
@@ -23,21 +99,28 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
     dayInfo: data.dayInfo,
     visitDate: data.visitDate,
     batchSlot: data.batchSlot,
-    patientName: data.patientName,
-    patientAge: data.patientAge,
-    patientPhone: tenDigit,
+    patientName: cleanName,
+    patientAge: cleanAge,
+    patientPhone: cleanPhone,
     opdFee,
     payableAmount,
   };
 
-  if (payableAmount > 0 && typeof ctx.createRazorpayLink === "function") {
+  const createLinkFn =
+    typeof ctx.createCashfreeLink === "function"
+      ? ctx.createCashfreeLink
+      : typeof ctx.createRazorpayLink === "function"
+      ? ctx.createRazorpayLink
+      : null;
+
+  if (payableAmount > 0 && createLinkFn) {
     try {
       const sheetId = String(ctx.business?.sheetId || "").trim();
-      const linkRes = await ctx.createRazorpayLink({
+      const linkRes = await createLinkFn({
         amount: payableAmount,
-        customerName: data.patientName,
-        customerPhone: tenDigit,
-        description: `${doc.name || "OPD"} - ${data.visitDate}`,
+        customerName: cleanName,
+        customerPhone: cleanPhone,
+        description: `${doc.name || "OPD"} - ${data.visitDate || ""}`.trim(),
         spreadsheetId: sheetId,
         spreadsheet_id: sheetId,
         businessName: ctx.business?.name || "City Care OPD",
@@ -51,13 +134,19 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
           linkRes?.linkId ||
           linkRes?.link_id ||
           linkRes?.id ||
+          linkRes?.raw?.link_id ||
+          linkRes?.raw?.order_id ||
           ""
       ).trim();
+
       const payUrl = String(
         linkRes?.paymentLink ||
           linkRes?.payment_url ||
           linkRes?.link_url ||
+          linkRes?.short_url ||
           linkRes?.url ||
+          linkRes?.raw?.link_url ||
+          linkRes?.raw?.short_url ||
           ""
       ).trim();
 
@@ -72,38 +161,32 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
           data: { ...bookingPayload, orderId, payUrl },
         });
 
-        await ctx.sendText(
-          lang === "en"
-            ? `💳 *Complete Payment to Confirm Token*\n\n` +
-              `• Patient: *${data.patientName}* (${data.patientAge} yrs)\n` +
-              `• Doctor: *${doc.name}*\n` +
-              `• Date: *${data.visitDate}* | *${data.batchSlot}*\n` +
-              `• Amount to Pay: *₹${payableAmount}*\n\n` +
-              `Pay here: ${payUrl}\n\n` +
-              `Once paid, your token will be sent automatically.`
-            : `💳 *टोकन कन्फ़र्म करने के लिए पेमेंट करें*\n\n` +
-              `• मरीज़: *${data.patientName}* (${data.patientAge} वर्ष)\n` +
-              `• डॉक्टर: *${doc.name}*\n` +
-              `• तारीख: *${data.visitDate}* | *${data.batchSlot}*\n` +
-              `• देय राशि: *₹${payableAmount}*\n\n` +
-              `पेमेंट लिंक: ${payUrl}\n\n` +
-              `पेमेंट होते ही आपका टोकन अपने आप भेज दिया जाएगा।`
+        await sendPaymentLinkAndButtons(
+          ctx,
+          { bookingPayload, payUrl, payableAmount },
+          lang
         );
         return;
       }
 
+      const reasonText = String(
+        linkRes?.error ||
+          linkRes?.message ||
+          linkRes?.raw?.message ||
+          "Cashfree link URL not returned"
+      ).trim();
+
       await ctx.sendText(
         lang === "en"
-          ? `⚠️ *Payment Link Error*\nAmount: ₹${payableAmount}\nCould not generate payment link right now.`
-          : `⚠️ *पेमेंट लिंक बनाने में समस्या*\nराशि: ₹${payableAmount}\nअभी पेमेंट लिंक नहीं बन पाया।`
+          ? `⚠️ *Payment Link Error*\nAmount: ₹${payableAmount}\nReason: ${reasonText}`
+          : `⚠️ *पेमेंट लिंक बनाने में समस्या*\nराशि: ₹${payableAmount}\nकारण: ${reasonText}`
       );
       return;
     } catch (err) {
-      console.error("Payment link creation error:", err);
       await ctx.sendText(
         lang === "en"
-          ? `⚠️ Could not create payment link for ₹${payableAmount}.`
-          : `⚠️ ₹${payableAmount} का पेमेंट लिंक नहीं बन सका।`
+          ? `⚠️ Could not create payment link for ₹${payableAmount}: ${err.message}`
+          : `⚠️ ₹${payableAmount} का पेमेंट लिंक नहीं बन सका: ${err.message}`
       );
       return;
     }
@@ -113,9 +196,9 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
     const tokenId = `OPD_${Date.now().toString().slice(-4)}`;
     await ctx.recordPaidBookingAndLog({
       tokenId,
-      patientName: data.patientName,
-      patientAge: data.patientAge,
-      patientPhone: tenDigit,
+      patientName: cleanName,
+      patientAge: cleanAge,
+      patientPhone: cleanPhone,
       doctorId: doc.id || "",
       doctorName: doc.name || "",
       visitDate: data.visitDate,
@@ -127,8 +210,8 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
     ctx.clearSession(true);
     await ctx.sendText(
       lang === "en"
-        ? `✅ *OPD Token Booked*\n• Token: *${tokenId}*\n• Patient: *${data.patientName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
-        : `✅ *OPD टोकन बुक हो गया*\n• टोकन: *${tokenId}*\n• मरीज़: *${data.patientName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
+        ? `✅ *OPD Token Booked*\n• Token: *${tokenId}*\n• Patient: *${cleanName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
+        : `✅ *OPD टोकन बुक हो गया*\n• टोकन: *${tokenId}*\n• मरीज़: *${cleanName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
     );
     return;
   }
@@ -137,24 +220,83 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
   await sendMainMenu(ctx, lang);
 }
 
-async function handleAwaitPaymentStep(ctx, data, lang = "hi") {
+async function handleAwaitPaymentStep(
+  ctx,
+  data,
+  lang = "hi",
+  cleanText = "",
+  cleanId = ""
+) {
+  const lower = String(cleanText || "").trim().toLowerCase();
+  const isCancel =
+    cleanId === "PAY_CANCEL" ||
+    ["0", "cancel", "रद्द", "कैंसल", "band"].includes(lower);
+
+  if (isCancel) {
+    ctx.clearSession(true);
+    await ctx.sendText(
+      lang === "en"
+        ? "❌ Booking cancelled. Type *Hi* to start again."
+        : "❌ बुकिंग रद्द कर दी गई है। दोबारा शुरू करने के लिए *नमस्ते* या *Hi* लिखें।"
+    );
+    return;
+  }
+
   const orderId = String(data.orderId || "").trim();
+  if (orderId && typeof ctx.registerPendingPayment === "function") {
+    ctx.registerPendingPayment(orderId, { ...data, lang });
+  }
+
   if (orderId && typeof ctx.checkCashfreePaymentStatus === "function") {
     const statusRes = await ctx.checkCashfreePaymentStatus({ orderId });
     if (statusRes?.status === "PAID") {
-      await ctx.sendText(
-        lang === "en"
-          ? "✅ Payment verified! Confirming your token..."
-          : "✅ पेमेंट कन्फ़र्म हो गया है! आपका टोकन भेजा जा रहा है..."
-      );
-      return;
+      if (typeof ctx.confirmPendingBookingByOrderId === "function") {
+        const issued = await ctx.confirmPendingBookingByOrderId(
+          orderId,
+          statusRes.cf_payment_id || orderId
+        );
+        if (issued?.ok && issued?.tokenId) {
+          return;
+        }
+      }
+
+      if (typeof ctx.recordPaidBookingAndLog === "function") {
+        const tokenId = `OPD_${Date.now().toString().slice(-4)}`;
+        const doc = data.selectedDoctor || {};
+        await ctx.recordPaidBookingAndLog({
+          tokenId,
+          patientName: data.patientName || "Patient",
+          patientAge: data.patientAge || "",
+          patientPhone: normalizeTenDigitPhone(data.patientPhone || ctx.from),
+          doctorId: doc.id || "",
+          doctorName: doc.name || "",
+          visitDate: data.visitDate || "",
+          batchSlot: data.batchSlot || "",
+          opdFee: toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0),
+          advanceFee: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
+          paidAmount: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
+          paymentLinkId: orderId,
+          paymentRefId: statusRes.cf_payment_id || orderId,
+        });
+        ctx.clearSession(true);
+        await ctx.sendText(
+          lang === "en"
+            ? `✅ *Payment Received — OPD Token Confirmed*\n\n• Token No.: *${tokenId}*\n• Patient: *${data.patientName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
+            : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n• टोकन नंबर: *${tokenId}*\n• मरीज़: *${data.patientName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
+        );
+        return;
+      }
     }
   }
 
-  await ctx.sendText(
-    lang === "en"
-      ? `⏳ Payment is still pending${data.payUrl ? `:\n${data.payUrl}` : "."}`
-      : `⏳ आपका पेमेंट अभी पेंडिंग है${data.payUrl ? `:\n${data.payUrl}` : "।"}`
+  await sendPaymentLinkAndButtons(
+    ctx,
+    {
+      bookingPayload: data,
+      payUrl: data.payUrl || "",
+      payableAmount: data.payableAmount || data.opdFee || 0,
+    },
+    lang
   );
 }
 
