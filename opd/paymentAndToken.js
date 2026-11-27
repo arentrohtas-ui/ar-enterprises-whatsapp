@@ -293,10 +293,11 @@ async function handleAwaitPaymentStep(
     }
   }
 
+  const payLine = data.payUrl ? `\n\nपेमेंट लिंक:\n${data.payUrl}` : "";
   const retryMsg =
     lang === "en"
-      ? "⚠️ Payment has not been completed yet. Please complete the payment first and try again."
-      : "⚠️ आपका भुगतान अभी पूरा नहीं हुआ है। कृपया पहले भुगतान करें और फिर दोबारा ट्राई करें।";
+      ? `⚠️ Payment has not been completed yet. Please complete the payment first and try again.${payLine}`
+      : `⚠️ आपका भुगतान अभी पूरा नहीं हुआ है। कृपया पहले भुगतान करें और फिर दोबारा ट्राई करें।${payLine}`;
 
   await sendPaymentActionButtons(ctx, retryMsg, lang);
 }
