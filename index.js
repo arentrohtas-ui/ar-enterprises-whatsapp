@@ -8,6 +8,16 @@ app.use(express.json());
 const sessions = new Map();
 const GAS_WEBAPP_URL = String(process.env.GAS_WEBAPP_URL || "").trim();
 const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "ar_opd_verify_token").trim();
+const CRON_SECRET = String(process.env.CRON_SECRET || "").trim();
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function getTodayIstYmd() {
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  const y = ist.getUTCFullYear();
+  const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(ist.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 function getSessionKey(phoneId, from) {
   return `${phoneId || "default"}:${from || "user"}`;
@@ -76,7 +86,7 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
   };
 }
 
-async function resolveBusiness(phoneNumberId) {
+async function getActiveClients() {
   const res = await callGas("GET", { action: "get_clients" });
   const rawList = Array.isArray(res?.clients)
     ? res.clients
@@ -84,9 +94,13 @@ async function resolveBusiness(phoneNumberId) {
     ? res.data
     : [];
 
-  const clients = rawList
-    .map((item) => normalizeClientRow(item, phoneNumberId))
+  return rawList
+    .map((item) => normalizeClientRow(item))
     .filter((c) => c.status !== "INACTIVE" && c.status !== "DISABLED");
+}
+
+async function resolveBusiness(phoneNumberId) {
+  const clients = await getActiveClients();
 
   const matched = clients.find(
     (c) => phoneNumberId && String(c.phoneId).trim() === String(phoneNumberId).trim()
@@ -107,6 +121,34 @@ async function resolveBusiness(phoneNumberId) {
       phoneNumberId
     )
   );
+}
+
+async function sendWhatsAppText(business, toPhone, body) {
+  const digits = String(toPhone || "").replace(/\D/g, "");
+  const recipient = digits.length === 10 ? `91${digits}` : digits;
+
+  if (!business.phoneId || !business.token || !recipient) {
+    console.log("[WA REMINDER SIMULATED]", business.name, recipient, body);
+    return { ok: true, simulated: true };
+  }
+
+  const r = await fetch(
+    `https://graph.facebook.com/v21.0/${business.phoneId}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${business.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: recipient,
+        type: "text",
+        text: { body },
+      }),
+    }
+  );
+  return r.json();
 }
 
 function buildCtx(business, from) {
@@ -144,29 +186,7 @@ function buildCtx(business, from) {
         cashfreeAppId: business.cashfreeAppId,
         cashfreeSecretKey: business.cashfreeSecretKey,
       }),
-    sendText: async (body) => {
-      if (!business.phoneId || !business.token) {
-        console.log("[WA TEXT]", from, body);
-        return { ok: true, simulated: true };
-      }
-      const r = await fetch(
-        `https://graph.facebook.com/v21.0/${business.phoneId}/messages`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${business.token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messaging_product: "whatsapp",
-            to: from,
-            type: "text",
-            text: { body },
-          }),
-        }
-      );
-      return r.json();
-    },
+    sendText: (body) => sendWhatsAppText(business, from, body),
     sendWA: async (payload) => {
       if (!business.phoneId || !business.token) {
         console.log("[WA INTERACTIVE]", from, JSON.stringify(payload));
@@ -192,8 +212,88 @@ function buildCtx(business, from) {
   };
 }
 
+async function runScheduledReminders(visitDate = "") {
+  const targetDate = String(visitDate || "").trim() || getTodayIstYmd();
+  const clients = await getActiveClients();
+  const summary = [];
+
+  for (const client of clients) {
+    if (!client.sheetId) continue;
+
+    const dueRes = await callGas("GET", {
+      action: "get_due_reminders",
+      spreadsheet_id: client.sheetId,
+      visitDate: targetDate,
+    });
+
+    const dueList = Array.isArray(dueRes?.reminders) ? dueRes.reminders : [];
+    let sentCount = 0;
+
+    for (const item of dueList) {
+      const tokenId = String(item.Token_ID || "").trim();
+      const patientName = String(item.Patient_Name || "Patient").trim();
+      const patientPhone = String(item.Patient_Phone || "").trim();
+      const doctorName = String(item.Doctor_Name || "Doctor").trim();
+      const batchSlot = String(item.Batch_Slot || "").trim();
+      const dateStr = String(item.Visit_Date || targetDate).slice(0, 10);
+
+      if (!tokenId || !patientPhone) continue;
+
+      const reminderText =
+        `⏰ *OPD Appointment Reminder — ${client.name}*\n\n` +
+        `नमस्ते *${patientName}*,\n` +
+        `आपका OPD टोकन *${tokenId}* आज (*${dateStr}*) के लिए शेड्यूल है।\n` +
+        `• डॉक्टर: *${doctorName}*\n` +
+        `• समय बैच: *${batchSlot}*\n\n` +
+        `कृपया समय से पहले क्लिनिक पहुँचें।`;
+
+      const waRes = await sendWhatsAppText(client, patientPhone, reminderText);
+      if (waRes && !waRes.error) {
+        await callGas("POST", {
+          action: "mark_reminder_sent",
+          spreadsheetId: client.sheetId,
+          tokenId,
+          reminderSent: "Yes",
+        });
+        sentCount += 1;
+      }
+    }
+
+    summary.push({
+      clinic: client.name,
+      sheetId: client.sheetId,
+      dueFound: dueList.length,
+      sent: sentCount,
+    });
+  }
+
+  return { ok: true, visitDate: targetDate, summary };
+}
+
 app.get("/", (req, res) => {
   res.status(200).json({ ok: true, service: "AR Enterprises OPD Engine" });
+});
+
+app.all("/send-reminders", async (req, res) => {
+  try {
+    if (CRON_SECRET) {
+      const provided =
+        req.headers["x-cron-secret"] ||
+        req.query.secret ||
+        req.body?.secret ||
+        "";
+      if (String(provided).trim() !== CRON_SECRET) {
+        return res.status(401).json({ ok: false, error: "Unauthorized" });
+      }
+    }
+
+    const visitDate = req.query.visitDate || req.body?.visitDate || "";
+    const result = await runScheduledReminders(visitDate);
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error("Send Reminders Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Meta WhatsApp Webhook Verification
