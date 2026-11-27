@@ -1,4 +1,3 @@
-
 const { formatIstYmd } = require("./menu");
 
 function normalizeDateYmd(input) {
@@ -63,7 +62,55 @@ async function findBookingByTokenId(callGas, sheetId, tokenId) {
   }
 }
 
-function renderStandaloneAppHtml(appRole) {
+function findClientForOpd(clients = [], { opdId = "", sheetId = "" } = {}) {
+  const cleanOpdId = String(opdId || "").trim().toLowerCase();
+  const cleanSheetId = String(sheetId || "").trim();
+
+  if (cleanOpdId) {
+    const byOpd = clients.find(
+      (c) =>
+        String(c.opdId || "").trim().toLowerCase() === cleanOpdId ||
+        String(c.id || "").trim().toLowerCase() === cleanOpdId
+    );
+    if (byOpd) return byOpd;
+  }
+
+  if (cleanSheetId) {
+    const bySheet = clients.find(
+      (c) => String(c.sheetId || "").trim() === cleanSheetId
+    );
+    if (bySheet) return bySheet;
+  }
+
+  return (
+    clients.find((c) => String(c.category || "opd").toLowerCase() === "opd") ||
+    clients[0] || {
+      id: "",
+      opdId: cleanOpdId || "OPD_DEFAULT",
+      name: "OPD Clinic",
+      sheetId: cleanSheetId || process.env.DEFAULT_CLINIC_SHEET_ID || "",
+      doctorPin: process.env.STAFF_APP_PIN || "1234",
+      receptionPin: process.env.STAFF_APP_PIN || "1234",
+    }
+  );
+}
+
+function getExpectedPinForRole(client, role, fallbackPin) {
+  const cleanRole = String(role || "").trim().toLowerCase();
+  if (cleanRole === "doctor") {
+    return String(client?.doctorPin || client?.staffPin || fallbackPin || "").trim();
+  }
+  if (cleanRole === "reception") {
+    return String(
+      client?.receptionPin || client?.staffPin || fallbackPin || ""
+    ).trim();
+  }
+  return String(
+    client?.doctorPin || client?.receptionPin || client?.staffPin || fallbackPin || ""
+  ).trim();
+}
+
+function renderStandaloneAppHtml(appRole, opdId = "") {
   const isDoctor = appRole === "doctor";
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
@@ -77,7 +124,7 @@ function renderStandaloneAppHtml(appRole) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <title>${pageTitle}</title>
+  <title>${pageTitle}${opdId ? ` (${opdId})` : ""}</title>
   <style>
     :root {
       --bg: #f3f6fb;
@@ -279,8 +326,8 @@ function renderStandaloneAppHtml(appRole) {
   <div id="lockScreen" class="lock-wrap">
     <div class="lock-card">
       <h2>🔐 ${headerIcon} ${pageTitle}</h2>
-      <p>${pageTitle} खोलने के लिए PIN डालें</p>
-      <input id="pinInput" class="pin-input" type="password" inputmode="numeric" maxlength="8" placeholder="••••" />
+      <p>${opdId ? `OPD ID: <b>${opdId}</b> — ` : ""}${pageTitle} का PIN डालें</p>
+      <input id="pinInput" class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="••••" />
       <button class="btn btn-primary" onclick="unlockApp()">Unlock ${pageTitle}</button>
     </div>
   </div>
@@ -364,6 +411,7 @@ function renderStandaloneAppHtml(appRole) {
 
   <script>
     const APP_ROLE = "${appRole}";
+    const OPD_ID = "${opdId}";
     const TODAY_IST = "${todayIst}";
     let PIN = "";
     let state = { clinic: null, doctors: [], bookings: [] };
@@ -396,12 +444,21 @@ function renderStandaloneAppHtml(appRole) {
       renderView();
     }
 
+    function buildQuery() {
+      const params = new URLSearchParams();
+      if (OPD_ID) params.set("opdId", OPD_ID);
+      if (APP_ROLE) params.set("role", APP_ROLE);
+      if (state.clinic?.sheetId) params.set("sheetId", state.clinic.sheetId);
+      const q = params.toString();
+      return q ? \`?\${q}\` : "";
+    }
+
     async function unlockApp() {
       const pin = document.getElementById("pinInput").value.trim();
       const r = await fetch("/api/app/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin }),
+        body: JSON.stringify({ pin, opdId: OPD_ID, role: APP_ROLE }),
       });
       const d = await r.json();
       if (!r.ok || !d.ok) {
@@ -424,7 +481,7 @@ function renderStandaloneAppHtml(appRole) {
 
     async function loadAllData() {
       if (!PIN) return;
-      const r = await fetch("/api/app/data", {
+      const r = await fetch(\`/api/app/data\${buildQuery()}\`, {
         headers: { "x-staff-pin": PIN },
       });
       const d = await r.json();
@@ -463,6 +520,8 @@ function renderStandaloneAppHtml(appRole) {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
+          opdId: OPD_ID || state.clinic?.opdId,
+          role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           tokenId,
           queueStatus,
@@ -501,6 +560,8 @@ function renderStandaloneAppHtml(appRole) {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
+          opdId: OPD_ID || state.clinic?.opdId,
+          role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           tokenId,
           amount: amt,
@@ -525,6 +586,8 @@ function renderStandaloneAppHtml(appRole) {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
+          opdId: OPD_ID || state.clinic?.opdId,
+          role: APP_ROLE,
           sheetId: state.clinic?.sheetId,
           doctorId: doc.id,
           doctorName: doc.name,
@@ -673,45 +736,64 @@ function registerOpdStaffAppRoutes(app, deps) {
     sendTwoAheadAlertIfNeeded,
   } = deps;
 
-  function isValidStaffPin(req) {
+  async function verifyStaffRequest(req, expectedRole = "") {
     const pin = String(
       req.headers["x-staff-pin"] || req.query.pin || req.body?.pin || ""
     ).trim();
-    return pin && pin === staffAppPin;
+    if (!pin) return { ok: false, error: "PIN आवश्यक है" };
+
+    const opdId = String(
+      req.body?.opdId || req.query.opdId || req.headers["x-opd-id"] || ""
+    ).trim();
+    const sheetId = String(
+      req.body?.sheetId || req.query.sheetId || ""
+    ).trim();
+    const role = String(
+      expectedRole || req.body?.role || req.query.role || ""
+    ).trim();
+
+    let clients = [];
+    try {
+      clients = await getActiveClients();
+    } catch (_) {}
+
+    const targetClient = findClientForOpd(clients, { opdId, sheetId });
+    const validPin = getExpectedPinForRole(targetClient, role, staffAppPin);
+
+    if (pin !== validPin) {
+      return { ok: false, error: "गलत PIN / Invalid PIN" };
+    }
+    return { ok: true, client: targetClient };
   }
 
-  app.post("/api/app/login", (req, res) => {
-    const pin = String(req.body?.pin || "").trim();
-    if (pin !== staffAppPin) {
-      return res
-        .status(401)
-        .json({ ok: false, error: "गलत PIN / Invalid PIN" });
+  app.post("/api/app/login", async (req, res) => {
+    const check = await verifyStaffRequest(req);
+    if (!check.ok) {
+      return res.status(401).json({ ok: false, error: check.error });
     }
-    return res.status(200).json({ ok: true, today: getTodayIstYmd() });
+    return res.status(200).json({
+      ok: true,
+      today: getTodayIstYmd(),
+      opdId: check.client?.opdId || "",
+    });
   });
 
   app.get("/api/app/data", async (req, res) => {
     try {
-      if (!isValidStaffPin(req)) {
-        return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+      const check = await verifyStaffRequest(req);
+      if (!check.ok) {
+        return res.status(401).json({ ok: false, error: check.error });
       }
       const clients = await getActiveClients();
-      const requestedSheetId = String(
-        req.query.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
-      ).trim();
-      const activeClient =
-        clients.find((c) => c.sheetId === requestedSheetId) ||
-        clients[0] || {
-          name: "OPD Clinic",
-          sheetId: process.env.DEFAULT_CLINIC_SHEET_ID || "",
-        };
+      const activeClient = check.client;
 
-      if (!activeClient.sheetId) {
+      if (!activeClient?.sheetId) {
         return res.status(200).json({
           ok: true,
           today: getTodayIstYmd(),
           clients: clients.map((c) => ({
             id: c.id,
+            opdId: c.opdId,
             name: c.name,
             sheetId: c.sheetId,
           })),
@@ -732,11 +814,13 @@ function registerOpdStaffAppRoutes(app, deps) {
         today: getTodayIstYmd(),
         clients: clients.map((c) => ({
           id: c.id,
+          opdId: c.opdId,
           name: c.name,
           sheetId: c.sheetId,
         })),
         clinic: {
           id: activeClient.id,
+          opdId: activeClient.opdId,
           name: activeClient.name,
           sheetId: activeClient.sheetId,
         },
@@ -751,12 +835,14 @@ function registerOpdStaffAppRoutes(app, deps) {
 
   app.post("/api/app/queue-status", async (req, res) => {
     try {
-      if (!isValidStaffPin(req)) {
-        return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+      const check = await verifyStaffRequest(req);
+      if (!check.ok) {
+        return res.status(401).json({ ok: false, error: check.error });
       }
 
       const { sheetId, tokenId, queueStatus } = req.body || {};
-      if (!sheetId || !tokenId || !queueStatus) {
+      const targetSheetId = String(sheetId || check.client?.sheetId || "").trim();
+      if (!targetSheetId || !tokenId || !queueStatus) {
         return res
           .status(400)
           .json({ ok: false, error: "sheetId, tokenId, queueStatus required" });
@@ -764,7 +850,7 @@ function registerOpdStaffAppRoutes(app, deps) {
 
       const existingBooking = await findBookingByTokenId(
         callGas,
-        sheetId,
+        targetSheetId,
         tokenId
       );
       if (existingBooking && isPastDateYmd(existingBooking.Visit_Date)) {
@@ -776,8 +862,8 @@ function registerOpdStaffAppRoutes(app, deps) {
 
       const gasRes = await callGas("POST", {
         action: "update_queue_status",
-        spreadsheetId: sheetId,
-        spreadsheet_id: sheetId,
+        spreadsheetId: targetSheetId,
+        spreadsheet_id: targetSheetId,
         tokenId: String(tokenId).trim(),
         queueStatus: String(queueStatus).trim(),
       });
@@ -787,10 +873,10 @@ function registerOpdStaffAppRoutes(app, deps) {
         String(queueStatus).trim().toLowerCase() === "in consultation" &&
         gasRes?.alert2Ahead
       ) {
-        const business = await resolveBusiness("", sheetId);
+        const business = await resolveBusiness("", targetSheetId);
         notifiedToken = await sendTwoAheadAlertIfNeeded(
           business,
-          sheetId,
+          targetSheetId,
           gasRes.alert2Ahead
         );
       }
@@ -808,14 +894,16 @@ function registerOpdStaffAppRoutes(app, deps) {
 
   app.post("/api/app/cash-deposit", async (req, res) => {
     try {
-      if (!isValidStaffPin(req)) {
-        return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+      const check = await verifyStaffRequest(req, "reception");
+      if (!check.ok) {
+        return res.status(401).json({ ok: false, error: check.error });
       }
 
       const { sheetId, tokenId, amount } = req.body || {};
+      const targetSheetId = String(sheetId || check.client?.sheetId || "").trim();
       const depositAmount = Number(amount);
       if (
-        !sheetId ||
+        !targetSheetId ||
         !tokenId ||
         !Number.isFinite(depositAmount) ||
         depositAmount <= 0
@@ -828,7 +916,7 @@ function registerOpdStaffAppRoutes(app, deps) {
 
       const existingBooking = await findBookingByTokenId(
         callGas,
-        sheetId,
+        targetSheetId,
         tokenId
       );
       if (existingBooking && isPastDateYmd(existingBooking.Visit_Date)) {
@@ -841,8 +929,8 @@ function registerOpdStaffAppRoutes(app, deps) {
 
       const gasRes = await callGas("POST", {
         action: "record_cash_deposit",
-        spreadsheetId: sheetId,
-        spreadsheet_id: sheetId,
+        spreadsheetId: targetSheetId,
+        spreadsheet_id: targetSheetId,
         tokenId: String(tokenId).trim(),
         depositAmount,
         amount: depositAmount,
@@ -861,12 +949,14 @@ function registerOpdStaffAppRoutes(app, deps) {
 
   app.post("/api/app/doctor-avail", async (req, res) => {
     try {
-      if (!isValidStaffPin(req)) {
-        return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+      const check = await verifyStaffRequest(req, "doctor");
+      if (!check.ok) {
+        return res.status(401).json({ ok: false, error: check.error });
       }
 
       const { sheetId, doctorId, doctorName, dayKey, avail } = req.body || {};
-      if (!sheetId || !dayKey || !avail) {
+      const targetSheetId = String(sheetId || check.client?.sheetId || "").trim();
+      if (!targetSheetId || !dayKey || !avail) {
         return res
           .status(400)
           .json({ ok: false, error: "sheetId, dayKey, avail required" });
@@ -881,8 +971,8 @@ function registerOpdStaffAppRoutes(app, deps) {
 
       const gasRes = await callGas("POST", {
         action: "update_doctor_avail",
-        spreadsheetId: sheetId,
-        spreadsheet_id: sheetId,
+        spreadsheetId: targetSheetId,
+        spreadsheet_id: targetSheetId,
         doctorId,
         doctorName,
         dayKey,
@@ -898,16 +988,27 @@ function registerOpdStaffAppRoutes(app, deps) {
 
   app.get("/reception-app", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("reception"));
+    res.send(renderStandaloneAppHtml("reception", req.query.opdId || ""));
+  });
+
+  app.get("/reception-app/:opdId", (req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(renderStandaloneAppHtml("reception", req.params.opdId || ""));
   });
 
   app.get("/doctor-app", (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("doctor"));
+    res.send(renderStandaloneAppHtml("doctor", req.query.opdId || ""));
+  });
+
+  app.get("/doctor-app/:opdId", (req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(renderStandaloneAppHtml("doctor", req.params.opdId || ""));
   });
 
   app.get("/app", (req, res) => {
-    res.redirect("/reception-app");
+    const opdId = String(req.query.opdId || "").trim();
+    res.redirect(opdId ? `/reception-app/${encodeURIComponent(opdId)}` : "/reception-app");
   });
 }
 
