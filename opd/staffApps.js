@@ -215,10 +215,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       justify-content: center;
       gap: 6px;
     }
-    .btn:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .btn-primary { background: var(--primary); color: #fff; width: 100%; }
     .btn-primary:active { background: var(--primary-dark); }
     .btn-live { background: #137333; color: #fff; flex: 1; }
@@ -299,9 +296,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       gap: 10px 14px;
     }
     @media (min-width: 520px) {
-      .acct-grid {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-      }
+      .acct-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     }
 
     .q-card {
@@ -319,11 +314,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       margin-bottom: 6px;
       gap: 8px;
     }
-    .token-pill {
-      font-weight: 800;
-      font-size: 15px;
-      color: var(--primary);
-    }
+    .token-pill { font-weight: 800; font-size: 15px; color: var(--primary); }
     .badge {
       padding: 4px 10px;
       border-radius: 999px;
@@ -382,7 +373,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
   <div id="lockScreen" class="lock-wrap">
     <div class="lock-card">
       <h2>🔐 ${headerIcon} ${pageTitle}</h2>
-      <p>${businessId ? `Business ID: <b>${businessId}</b> — ` : ""}${pageTitle} का PIN डालें</p>
+      <p>${businessId ? "Business ID: <b>" + businessId + "</b> — " : ""}${pageTitle} का PIN डालें</p>
       <input id="pinInput" class="pin-input" type="password" inputmode="numeric" maxlength="12" placeholder="••••" />
       <button class="btn btn-primary" onclick="unlockApp()">Unlock ${pageTitle}</button>
     </div>
@@ -458,76 +449,73 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
   </div>
 
   <script>
-    const APP_ROLE = "${appRole}";
-    const BUSINESS_ID = "${businessId}";
-    const TODAY_IST = "${todayIst}";
-    let PIN = "";
-    let state = { clinic: null, doctors: [], bookings: [] };
+    var APP_ROLE = "${appRole}";
+    var BUSINESS_ID = "${businessId}";
+    var TODAY_IST = "${todayIst}";
+    var PIN = "";
+    var state = { clinic: null, doctors: [], bookings: [] };
 
     function toYmd(val) {
       if (!val) return "";
-      const s = String(val).trim();
-      const ymd = s.match(/^(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})/);
-      if (ymd) return \`\${ymd[1]}-\${String(ymd[2]).padStart(2, "0")}-\${String(ymd[3]).padStart(2, "0")}\`;
-      const dmy = s.match(/^(\\d{1,2})[-/](\\d{1,2})[-/](\\d{4})/);
-      if (dmy) return \`\${dmy[3]}-\${String(dmy[2]).padStart(2, "0")}-\${String(dmy[1]).padStart(2, "0")}\`;
+      var s = String(val).trim();
+      var ymd = s.match(/^(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})/);
+      if (ymd) return ymd[1] + "-" + String(ymd[2]).padStart(2, "0") + "-" + String(ymd[3]).padStart(2, "0");
+      var dmy = s.match(/^(\\d{1,2})[-/](\\d{1,2})[-/](\\d{4})/);
+      if (dmy) return dmy[3] + "-" + String(dmy[2]).padStart(2, "0") + "-" + String(dmy[1]).padStart(2, "0");
       return s.slice(0, 10);
     }
 
     function isPastDate(val) {
-      const ymd = toYmd(val);
+      var ymd = toYmd(val);
       return Boolean(ymd && ymd < TODAY_IST);
     }
 
     function splitPaidByChannel(booking) {
-      const paid = Math.max(0, Number(booking?.Paid_Amount || 0));
-      const explicitCash = Number(booking?.Cash_Amount ?? booking?.cashAmount ?? NaN);
-      const explicitOnline = Number(booking?.Online_Amount ?? booking?.onlineAmount ?? NaN);
+      var paid = Math.max(0, Number((booking && booking.Paid_Amount) || 0));
+      var explicitCash = Number((booking && (booking.Cash_Amount !== undefined ? booking.Cash_Amount : booking.cashAmount)));
+      var explicitOnline = Number((booking && (booking.Online_Amount !== undefined ? booking.Online_Amount : booking.onlineAmount)));
 
       if (Number.isFinite(explicitCash) || Number.isFinite(explicitOnline)) {
-        const cash = Number.isFinite(explicitCash) ? Math.max(0, explicitCash) : 0;
-        const online = Number.isFinite(explicitOnline)
-          ? Math.max(0, explicitOnline)
-          : Math.max(0, paid - cash);
-        return { online, cash };
+        var cash = Number.isFinite(explicitCash) ? Math.max(0, explicitCash) : 0;
+        var online = Number.isFinite(explicitOnline) ? Math.max(0, explicitOnline) : Math.max(0, paid - cash);
+        return { online: online, cash: cash };
       }
 
-      const modeText = \`\${booking?.Payment_Mode || ""} \${booking?.Payment_Status || ""}\`.toLowerCase();
-      const isCash = modeText.includes("cash");
-      if (isCash) {
+      var modeText = (String((booking && booking.Payment_Mode) || "") + " " + String((booking && booking.Payment_Status) || "")).toLowerCase();
+      if (modeText.indexOf("cash") !== -1) {
         return { online: 0, cash: paid };
       }
       return { online: paid, cash: 0 };
     }
 
     function getFilteredBookings() {
-      let fromVal = toYmd(document.getElementById("fromDateFilter").value);
-      let toVal = toYmd(document.getElementById("toDateFilter").value);
-      const docVal = document.getElementById("doctorFilter").value;
+      var fromVal = toYmd(document.getElementById("fromDateFilter").value);
+      var toVal = toYmd(document.getElementById("toDateFilter").value);
+      var docVal = document.getElementById("doctorFilter").value;
 
       if (fromVal && toVal && fromVal > toVal) {
-        const tmp = fromVal;
+        var tmp = fromVal;
         fromVal = toVal;
         toVal = tmp;
       }
 
-      const list = state.bookings.filter((b) => {
-        const vDate = toYmd(b.Visit_Date);
-        const matchFrom = !fromVal || (vDate && vDate >= fromVal);
-        const matchTo = !toVal || (vDate && vDate <= toVal);
-        const matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
+      var list = state.bookings.filter(function(b) {
+        var vDate = toYmd(b.Visit_Date);
+        var matchFrom = !fromVal || (vDate && vDate >= fromVal);
+        var matchTo = !toVal || (vDate && vDate <= toVal);
+        var matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
         return matchFrom && matchTo && matchDoc;
       });
 
-      return { list, fromVal, toVal, docVal };
+      return { list: list, fromVal: fromVal, toVal: toVal, docVal: docVal };
     }
 
     function showToast(msg) {
-      const el = document.getElementById("toast");
+      var el = document.getElementById("toast");
       el.textContent = msg;
       el.style.display = "block";
       clearTimeout(window._t);
-      window._t = setTimeout(() => { el.style.display = "none"; }, 3200);
+      window._t = setTimeout(function() { el.style.display = "none"; }, 3200);
     }
 
     function clearDateFilter() {
@@ -537,22 +525,22 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     }
 
     function buildQuery() {
-      const params = new URLSearchParams();
+      var params = new URLSearchParams();
       if (BUSINESS_ID) params.set("businessId", BUSINESS_ID);
       if (APP_ROLE) params.set("role", APP_ROLE);
-      if (state.clinic?.sheetId) params.set("sheetId", state.clinic.sheetId);
-      const q = params.toString();
-      return q ? \`?\${q}\` : "";
+      if (state.clinic && state.clinic.sheetId) params.set("sheetId", state.clinic.sheetId);
+      var q = params.toString();
+      return q ? "?" + q : "";
     }
 
     async function unlockApp() {
-      const pin = document.getElementById("pinInput").value.trim();
-      const r = await fetch("/api/app/login", {
+      var pin = document.getElementById("pinInput").value.trim();
+      var r = await fetch("/api/app/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, businessId: BUSINESS_ID, role: APP_ROLE }),
+        body: JSON.stringify({ pin: pin, businessId: BUSINESS_ID, role: APP_ROLE }),
       });
-      const d = await r.json();
+      var d = await r.json();
       if (!r.ok || !d.ok) {
         showToast(d.error || "गलत PIN");
         return;
@@ -574,10 +562,10 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
 
     async function loadAllData() {
       if (!PIN) return;
-      const r = await fetch(\`/api/app/data\${buildQuery()}\`, {
+      var r = await fetch("/api/app/data" + buildQuery(), {
         headers: { "x-staff-pin": PIN },
       });
-      const d = await r.json();
+      var d = await r.json();
       if (!r.ok || !d.ok) {
         showToast(d.error || "Data load failed");
         return;
@@ -586,50 +574,52 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       state.doctors = d.doctors || [];
       state.bookings = d.bookings || [];
       document.getElementById("clinicTitle").textContent =
-        \`${headerIcon} \${d.clinic?.name || "OPD"} — ${pageTitle}\`;
+        "${headerIcon} " + ((d.clinic && d.clinic.name) || "OPD") + " — ${pageTitle}";
 
-      const sel = document.getElementById("doctorFilter");
-      const prevVal = sel.value || "ALL";
+      var sel = document.getElementById("doctorFilter");
+      var prevVal = sel.value || "ALL";
       sel.innerHTML = '<option value="ALL">सभी डॉक्टर / All Doctors</option>';
-      state.doctors.forEach((doc) => {
-        const opt = document.createElement("option");
+      state.doctors.forEach(function(doc) {
+        var opt = document.createElement("option");
         opt.value = doc.name;
         opt.textContent = doc.name;
         sel.appendChild(opt);
       });
-      if ([...sel.options].some((o) => o.value === prevVal)) sel.value = prevVal;
+      if ([].slice.call(sel.options).some(function(o) { return o.value === prevVal; })) {
+        sel.value = prevVal;
+      }
 
       renderView();
     }
 
     async function setQueueStatus(tokenId, queueStatus) {
-      const target = state.bookings.find((b) => String(b.Token_ID || "") === String(tokenId));
+      var target = state.bookings.find(function(b) { return String(b.Token_ID || "") === String(tokenId); });
       if (target && isPastDate(target.Visit_Date)) {
         showToast("🔒 पिछले दिन के रिकॉर्ड में बदलाव की अनुमति नहीं है");
         return;
       }
 
-      const r = await fetch("/api/app/queue-status", {
+      var r = await fetch("/api/app/queue-status", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          businessId: BUSINESS_ID || state.clinic?.id,
+          businessId: BUSINESS_ID || (state.clinic && state.clinic.id),
           role: APP_ROLE,
-          sheetId: state.clinic?.sheetId,
-          tokenId,
-          queueStatus,
+          sheetId: state.clinic && state.clinic.sheetId,
+          tokenId: tokenId,
+          queueStatus: queueStatus,
         }),
       });
-      const d = await r.json();
+      var d = await r.json();
       if (!r.ok || !d.ok) {
         showToast(d.error || "Update failed");
         return;
       }
       state.bookings = d.bookings || state.bookings;
       if (d.notified2AheadToken) {
-        showToast(\`✅ \${tokenId} → \${queueStatus} | 2 नंबर अलर्ट: \${d.notified2AheadToken}\`);
+        showToast("✅ " + tokenId + " → " + queueStatus + " | 2 नंबर अलर्ट: " + d.notified2AheadToken);
       } else {
-        showToast(\`✅ \${tokenId} → \${queueStatus}\`);
+        showToast("✅ " + tokenId + " → " + queueStatus);
       }
       renderView();
     }
@@ -640,27 +630,27 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
         return;
       }
 
-      const defaultAmt = currentBalance > 0 ? String(currentBalance) : "";
-      const entered = prompt(\`टोकन \${tokenId} के लिए Cash Deposit राशि (₹) डालें (Dues: ₹\${currentBalance}):\`, defaultAmt);
+      var defaultAmt = currentBalance > 0 ? String(currentBalance) : "";
+      var entered = prompt("टोकन " + tokenId + " के लिए Cash Deposit राशि (₹) डालें (Dues: ₹" + currentBalance + "):", defaultAmt);
       if (entered === null) return;
-      const amt = Number(String(entered).trim());
+      var amt = Number(String(entered).trim());
       if (!Number.isFinite(amt) || amt <= 0) {
         showToast("कृपया सही राशि (₹) डालें");
         return;
       }
 
-      const r = await fetch("/api/app/cash-deposit", {
+      var r = await fetch("/api/app/cash-deposit", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          businessId: BUSINESS_ID || state.clinic?.id,
+          businessId: BUSINESS_ID || (state.clinic && state.clinic.id),
           role: APP_ROLE,
-          sheetId: state.clinic?.sheetId,
-          tokenId,
+          sheetId: state.clinic && state.clinic.sheetId,
+          tokenId: tokenId,
           amount: amt,
         }),
       });
-      const d = await r.json();
+      var d = await r.json();
       if (!r.ok || !d.ok) {
         showToast(d.error || "Cash deposit failed");
         return;
@@ -668,47 +658,48 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       if (Array.isArray(d.bookings) && d.bookings.length) {
         state.bookings = d.bookings;
       } else {
-        state.bookings = state.bookings.map((b) => {
+        state.bookings = state.bookings.map(function(b) {
           if (String(b.Token_ID || "") !== String(tokenId)) return b;
-          const nextPaid = Number(b.Paid_Amount || 0) + amt;
-          const prevCash = Number(b.Cash_Amount || 0);
-          const modeLower = String(b.Payment_Mode || "").toLowerCase();
-          const nextCash = modeLower.includes("cash") || prevCash > 0 ? prevCash + amt : amt;
-          return {
-            ...b,
+          var nextPaid = Number(b.Paid_Amount || 0) + amt;
+          var prevCash = Number(b.Cash_Amount || 0);
+          var modeLower = String(b.Payment_Mode || "").toLowerCase();
+          var nextCash = (modeLower.indexOf("cash") !== -1 || prevCash > 0) ? prevCash + amt : amt;
+          return Object.assign({}, b, {
             Paid_Amount: nextPaid,
             Cash_Amount: nextCash,
             Payment_Mode: b.Payment_Mode || "Cash",
-          };
+          });
         });
       }
-      showToast(\`💵 \${tokenId} में ₹\${amt} Cash Deposit दर्ज हुआ\`);
+      showToast("💵 " + tokenId + " में ₹" + amt + " Cash Deposit दर्ज हुआ");
       renderView();
     }
 
-    async function toggleDoctorAvail(doc, dayKey) {
-      const curMap = { today: doc.todayAvail, next: doc.nextDayAvail, plus2: doc.plus2DayAvail };
-      const nextAvail = String(curMap[dayKey] || "P").toUpperCase() === "P" ? "A" : "P";
-      const r = await fetch("/api/app/doctor-avail", {
+    async function toggleDoctorAvailByIndex(idx, dayKey) {
+      var doc = state.doctors[idx];
+      if (!doc) return;
+      var curMap = { today: doc.todayAvail, next: doc.nextDayAvail, plus2: doc.plus2DayAvail };
+      var nextAvail = String(curMap[dayKey] || "P").toUpperCase() === "P" ? "A" : "P";
+      var r = await fetch("/api/app/doctor-avail", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
         body: JSON.stringify({
-          businessId: BUSINESS_ID || state.clinic?.id,
+          businessId: BUSINESS_ID || (state.clinic && state.clinic.id),
           role: APP_ROLE,
-          sheetId: state.clinic?.sheetId,
+          sheetId: state.clinic && state.clinic.sheetId,
           doctorId: doc.id,
           doctorName: doc.name,
-          dayKey,
+          dayKey: dayKey,
           avail: nextAvail,
         }),
       });
-      const d = await r.json();
+      var d = await r.json();
       if (!r.ok || !d.ok) {
         showToast(d.error || "Availability update failed");
         return;
       }
       await loadAllData();
-      showToast(\`🩺 \${doc.name} (\${dayKey}) → \${nextAvail}\`);
+      showToast("🩺 " + doc.name + " (" + dayKey + ") → " + nextAvail);
     }
 
     function escapeHtml(str) {
@@ -720,244 +711,215 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     }
 
     function downloadRangePdf() {
-      const { list, fromVal, toVal, docVal } = getFilteredBookings();
+      var filtered = getFilteredBookings();
+      var list = filtered.list;
+      var fromVal = filtered.fromVal;
+      var toVal = filtered.toVal;
+      var docVal = filtered.docVal;
+
       if (!list.length) {
         showToast("इस Date Range में कोई डेटा नहीं है");
         return;
       }
 
-      let sumTotal = 0;
-      let sumOnline = 0;
-      let sumCash = 0;
-      let sumDues = 0;
+      var sumTotal = 0;
+      var sumOnline = 0;
+      var sumCash = 0;
+      var sumDues = 0;
 
-      const rowsHtml = list
-        .map((b, idx) => {
-          const fee = Math.max(0, Number(b.OPD_Fee || 0));
-          const paid = Math.max(0, Number(b.Paid_Amount || 0));
-          const dues = Math.max(0, fee - paid);
-          const { online, cash } = splitPaidByChannel(b);
-          sumTotal += fee;
-          sumOnline += online;
-          sumCash += cash;
-          sumDues += dues;
+      var rowsHtml = list.map(function(b, idx) {
+        var fee = Math.max(0, Number(b.OPD_Fee || 0));
+        var paid = Math.max(0, Number(b.Paid_Amount || 0));
+        var dues = Math.max(0, fee - paid);
+        var ch = splitPaidByChannel(b);
+        sumTotal += fee;
+        sumOnline += ch.online;
+        sumCash += ch.cash;
+        sumDues += dues;
 
-          return \`<tr>
-            <td>\${idx + 1}</td>
-            <td><b>\${escapeHtml(b.Token_ID)}</b></td>
-            <td>\${escapeHtml(toYmd(b.Visit_Date))}</td>
-            <td>\${escapeHtml(b.Patient_Name)} (\${escapeHtml(b.Patient_Age)}y)</td>
-            <td>\${escapeHtml(b.Patient_Phone)}</td>
-            <td>\${escapeHtml(b.Doctor_Name)}</td>
-            <td style="text-align:right;">₹\${fee}</td>
-            <td style="text-align:right;">₹\${online}</td>
-            <td style="text-align:right;">₹\${cash}</td>
-            <td style="text-align:right;color:\${dues > 0 ? '#b91c1c' : '#15803d'};"><b>₹\${dues}</b></td>
-            <td>\${escapeHtml(b.Queue_Status || "Waiting")}</td>
-          </tr>\`;
-        })
-        .join("");
+        return "<tr>" +
+          "<td>" + (idx + 1) + "</td>" +
+          "<td><b>" + escapeHtml(b.Token_ID) + "</b></td>" +
+          "<td>" + escapeHtml(toYmd(b.Visit_Date)) + "</td>" +
+          "<td>" + escapeHtml(b.Patient_Name) + " (" + escapeHtml(b.Patient_Age) + "y)</td>" +
+          "<td>" + escapeHtml(b.Patient_Phone) + "</td>" +
+          "<td>" + escapeHtml(b.Doctor_Name) + "</td>" +
+          '<td style="text-align:right;">₹' + fee + "</td>" +
+          '<td style="text-align:right;">₹' + ch.online + "</td>" +
+          '<td style="text-align:right;">₹' + ch.cash + "</td>" +
+          '<td style="text-align:right;color:' + (dues > 0 ? "#b91c1c" : "#15803d") + ';"><b>₹' + dues + "</b></td>" +
+          "<td>" + escapeHtml(b.Queue_Status || "Waiting") + "</td>" +
+          "</tr>";
+      }).join("");
 
-      const rangeLabel =
-        fromVal || toVal
-          ? \`\${fromVal || "शुरू"} से \${toVal || "आज तक"}\`
-          : "सभी तारीख (All Dates)";
-      const clinicName = escapeHtml(state.clinic?.name || BUSINESS_ID || "OPD Clinic");
-      const doctorLabel = docVal === "ALL" ? "सभी डॉक्टर (All Doctors)" : escapeHtml(docVal);
+      var rangeLabel = (fromVal || toVal)
+        ? ((fromVal || "शुरू") + " से " + (toVal || "आज तक"))
+        : "सभी तारीख (All Dates)";
+      var clinicName = escapeHtml((state.clinic && state.clinic.name) || BUSINESS_ID || "OPD Clinic");
+      var doctorLabel = docVal === "ALL" ? "सभी डॉक्टर (All Doctors)" : escapeHtml(docVal);
 
-      const printWin = window.open("", "_blank");
+      var printWin = window.open("", "_blank");
       if (!printWin) {
         showToast("Pop-up blocked — ब्राउज़र में Pop-up Allow करें");
         return;
       }
 
-      printWin.document.write(\`<!doctype html>
-<html lang="hi">
-<head>
-  <meta charset="utf-8" />
-  <title>\${clinicName} — OPD Report (\${rangeLabel})</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 20px; color: #111827; }
-    .hdr { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0f62fe; padding-bottom: 12px; margin-bottom: 16px; }
-    .hdr h1 { margin: 0 0 4px; font-size: 20px; color: #0f172a; }
-    .hdr p { margin: 2px 0; font-size: 12.5px; color: #475569; }
-    .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 16px; }
-    .card { border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 10px; background: #f8fafc; }
-    .card span { display: block; font-size: 10.5px; color: #475569; text-transform: uppercase; font-weight: 700; }
-    .card b { font-size: 16px; color: #0f172a; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; }
-    th { background: #0f62fe; color: #fff; font-weight: 700; }
-    tr:nth-child(even) { background: #f8fafc; }
-    tfoot td { background: #e2e8f0; font-weight: 800; }
-    @media print {
-      .no-print { display: none; }
-      body { margin: 8mm; }
-    }
-  </style>
-</head>
-<body>
-  <div class="no-print" style="margin-bottom:12px;text-align:right;">
-    <button onclick="window.print()" style="background:#0f62fe;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:700;cursor:pointer;">🖨️ Print / Save as PDF</button>
-  </div>
-  <div class="hdr">
-    <div>
-      <h1>\${clinicName} — OPD Date Range Report</h1>
-      <p><b>Date Range:</b> \${rangeLabel} | <b>Doctor:</b> \${doctorLabel}</p>
-    </div>
-    <div style="text-align:right;">
-      <p><b>Generated On:</b> \${TODAY_IST}</p>
-      <p><b>Business ID:</b> \${escapeHtml(BUSINESS_ID || state.clinic?.id || "")}</p>
-    </div>
-  </div>
+      var reportDoc =
+        '<!doctype html><html lang="hi"><head><meta charset="utf-8" />' +
+        "<title>" + clinicName + " — OPD Report (" + rangeLabel + ")</title>" +
+        "<style>" +
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:20px;color:#111827;}" +
+        ".hdr{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0f62fe;padding-bottom:12px;margin-bottom:16px;}" +
+        ".hdr h1{margin:0 0 4px;font-size:20px;color:#0f172a;}.hdr p{margin:2px 0;font-size:12.5px;color:#475569;}" +
+        ".cards{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;}" +
+        ".card{border:1px solid #cbd5e1;border-radius:8px;padding:8px 10px;background:#f8fafc;}" +
+        ".card span{display:block;font-size:10.5px;color:#475569;text-transform:uppercase;font-weight:700;}" +
+        ".card b{font-size:16px;color:#0f172a;}" +
+        "table{width:100%;border-collapse:collapse;font-size:12px;}" +
+        "th,td{border:1px solid #cbd5e1;padding:6px 8px;text-align:left;}" +
+        "th{background:#0f62fe;color:#fff;font-weight:700;}tr:nth-child(even){background:#f8fafc;}" +
+        "tfoot td{background:#e2e8f0;font-weight:800;}" +
+        "@media print{.no-print{display:none;}body{margin:8mm;}}" +
+        "</style></head><body>" +
+        '<div class="no-print" style="margin-bottom:12px;text-align:right;">' +
+        '<button onclick="window.print()" style="background:#0f62fe;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:700;cursor:pointer;">🖨️ Print / Save as PDF</button>' +
+        "</div>" +
+        '<div class="hdr"><div><h1>' + clinicName + " — OPD Date Range Report</h1>" +
+        "<p><b>Date Range:</b> " + rangeLabel + " | <b>Doctor:</b> " + doctorLabel + "</p></div>" +
+        '<div style="text-align:right;"><p><b>Generated On:</b> ' + TODAY_IST + "</p>" +
+        "<p><b>Business ID:</b> " + escapeHtml(BUSINESS_ID || (state.clinic && state.clinic.id) || "") + "</p></div></div>" +
+        '<div class="cards">' +
+        '<div class="card"><span>Total Patients</span><b>' + list.length + "</b></div>" +
+        '<div class="card"><span>Total Amount</span><b>₹' + sumTotal + "</b></div>" +
+        '<div class="card"><span>Online Paid</span><b>₹' + sumOnline + "</b></div>" +
+        '<div class="card"><span>Cash Paid</span><b>₹' + sumCash + "</b></div>" +
+        '<div class="card"><span>Total Dues</span><b style="color:#b91c1c;">₹' + sumDues + "</b></div>" +
+        "</div>" +
+        "<table><thead><tr>" +
+        "<th>#</th><th>Token</th><th>Date</th><th>Patient</th><th>Mobile</th><th>Doctor</th>" +
+        '<th style="text-align:right;">Fee</th><th style="text-align:right;">Online</th><th style="text-align:right;">Cash</th><th style="text-align:right;">Dues</th>' +
+        "<th>Status</th></tr></thead><tbody>" + rowsHtml + "</tbody><tfoot><tr>" +
+        '<td colspan="6">GRAND TOTAL (' + list.length + " Patients)</td>" +
+        '<td style="text-align:right;">₹' + sumTotal + "</td>" +
+        '<td style="text-align:right;">₹' + sumOnline + "</td>" +
+        '<td style="text-align:right;">₹' + sumCash + "</td>" +
+        '<td style="text-align:right;">₹' + sumDues + "</td><td>—</td></tr></tfoot></table>" +
+        "<script>window.onload=function(){setTimeout(function(){window.print();},350);};<" + "/script>" +
+        "</body></html>";
 
-  <div class="cards">
-    <div class="card"><span>Total Patients</span><b>\${list.length}</b></div>
-    <div class="card"><span>Total Amount</span><b>₹\${sumTotal}</b></div>
-    <div class="card"><span>Online Paid</span><b>₹\${sumOnline}</b></div>
-    <div class="card"><span>Cash Paid</span><b>₹\${sumCash}</b></div>
-    <div class="card"><span>Total Dues</span><b style="color:#b91c1c;">₹\${sumDues}</b></div>
-  </div>
-
-  <table>
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Token</th>
-        <th>Date</th>
-        <th>Patient</th>
-        <th>Mobile</th>
-        <th>Doctor</th>
-        <th style="text-align:right;">Fee</th>
-        <th style="text-align:right;">Online</th>
-        <th style="text-align:right;">Cash</th>
-        <th style="text-align:right;">Dues</th>
-        <th>Status</th>
-      </tr>
-    </thead>
-    <tbody>\${rowsHtml}</tbody>
-    <tfoot>
-      <tr>
-        <td colspan="6">GRAND TOTAL (\${list.length} Patients)</td>
-        <td style="text-align:right;">₹\${sumTotal}</td>
-        <td style="text-align:right;">₹\${sumOnline}</td>
-        <td style="text-align:right;">₹\${sumCash}</td>
-        <td style="text-align:right;">₹\${sumDues}</td>
-        <td>—</td>
-      </tr>
-    </tfoot>
-  </table>
-  <script>
-    window.onload = function() { setTimeout(function() { window.print(); }, 350); };
-  <\/script>
-</body>
-</html>\`);
+      printWin.document.write(reportDoc);
       printWin.document.close();
     }
 
     function renderView() {
-      const { list, docVal } = getFilteredBookings();
+      var filtered = getFilteredBookings();
+      var list = filtered.list;
+      var docVal = filtered.docVal;
 
-      const running = list.find(
-        (b) => String(b.Queue_Status || "").trim().toLowerCase() === "in consultation"
-      );
-      const waitingList = list.filter(
-        (b) => String(b.Queue_Status || "Waiting").trim().toLowerCase() === "waiting"
-      );
+      var running = list.find(function(b) {
+        return String(b.Queue_Status || "").trim().toLowerCase() === "in consultation";
+      });
+      var waitingList = list.filter(function(b) {
+        return String(b.Queue_Status || "Waiting").trim().toLowerCase() === "waiting";
+      });
 
-      let sumTotal = 0;
-      let sumOnline = 0;
-      let sumCash = 0;
-      let sumDues = 0;
+      var sumTotal = 0;
+      var sumOnline = 0;
+      var sumCash = 0;
+      var sumDues = 0;
 
-      list.forEach((b) => {
-        const fee = Math.max(0, Number(b.OPD_Fee || 0));
-        const paid = Math.max(0, Number(b.Paid_Amount || 0));
-        const { online, cash } = splitPaidByChannel(b);
+      list.forEach(function(b) {
+        var fee = Math.max(0, Number(b.OPD_Fee || 0));
+        var paid = Math.max(0, Number(b.Paid_Amount || 0));
+        var ch = splitPaidByChannel(b);
         sumTotal += fee;
-        sumOnline += online;
-        sumCash += cash;
+        sumOnline += ch.online;
+        sumCash += ch.cash;
         sumDues += Math.max(0, fee - paid);
       });
 
       document.getElementById("currentTokenText").textContent =
-        running ? \`\${running.Token_ID} (\${running.Patient_Name})\` : "कोई नहीं / None";
+        running ? (running.Token_ID + " (" + running.Patient_Name + ")") : "कोई नहीं / None";
       document.getElementById("waitingCountText").textContent = String(waitingList.length);
       document.getElementById("totalPatientsText").textContent = String(list.length);
-      document.getElementById("totalAmountText").textContent = \`₹\${sumTotal}\`;
-      document.getElementById("totalOnlineText").textContent = \`₹\${sumOnline}\`;
-      document.getElementById("totalCashText").textContent = \`₹\${sumCash}\`;
-      document.getElementById("totalBalanceText").textContent = \`₹\${sumDues}\`;
+      document.getElementById("totalAmountText").textContent = "₹" + sumTotal;
+      document.getElementById("totalOnlineText").textContent = "₹" + sumOnline;
+      document.getElementById("totalCashText").textContent = "₹" + sumCash;
+      document.getElementById("totalBalanceText").textContent = "₹" + sumDues;
 
-      const container = document.getElementById("mainContent");
-      let html = "";
+      var container = document.getElementById("mainContent");
+      var html = "";
 
       if (APP_ROLE === "doctor") {
-        const docsToShow = docVal === "ALL"
-          ? state.doctors
-          : state.doctors.filter((d) => d.name === docVal);
+        var docsWithIdx = state.doctors.map(function(d, i) { return { doc: d, idx: i }; });
+        if (docVal !== "ALL") {
+          docsWithIdx = docsWithIdx.filter(function(item) { return item.doc.name === docVal; });
+        }
 
-        html += \`<div class="q-card"><b>🩺 Doctor Availability (P = Present, A = Absent)</b>\`;
-        docsToShow.forEach((doc) => {
-          html += \`
-            <div class="avail-row">
-              <div><b>\${doc.name}</b><br><span style="color:#525252;font-size:12px;">\${doc.specialty || ""}</span></div>
-              <div style="display:flex;gap:6px;">
-                <button class="chip \${doc.todayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "today")'>आज: \${doc.todayAvail || 'P'}</button>
-                <button class="chip \${doc.nextDayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "next")'>कल: \${doc.nextDayAvail || 'P'}</button>
-                <button class="chip \${doc.plus2DayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "plus2")'>परसों: \${doc.plus2DayAvail || 'P'}</button>
-              </div>
-            </div>
-          \`;
+        html += '<div class="q-card"><b>🩺 Doctor Availability (P = Present, A = Absent)</b>';
+        docsWithIdx.forEach(function(item) {
+          var doc = item.doc;
+          var idx = item.idx;
+          var tAv = doc.todayAvail || "P";
+          var nAv = doc.nextDayAvail || "P";
+          var pAv = doc.plus2DayAvail || "P";
+          html +=
+            '<div class="avail-row">' +
+            "<div><b>" + escapeHtml(doc.name) + '</b><br><span style="color:#525252;font-size:12px;">' + escapeHtml(doc.specialty || "") + "</span></div>" +
+            '<div style="display:flex;gap:6px;">' +
+            '<button class="chip ' + (tAv === "P" ? "chip-p" : "chip-a") + '" onclick="toggleDoctorAvailByIndex(' + idx + ', \'today\')">आज: ' + tAv + "</button>" +
+            '<button class="chip ' + (nAv === "P" ? "chip-p" : "chip-a") + '" onclick="toggleDoctorAvailByIndex(' + idx + ', \'next\')">कल: ' + nAv + "</button>" +
+            '<button class="chip ' + (pAv === "P" ? "chip-p" : "chip-a") + '" onclick="toggleDoctorAvailByIndex(' + idx + ', \'plus2\')">परसों: ' + pAv + "</button>" +
+            "</div></div>";
         });
-        html += \`</div>\`;
+        html += "</div>";
       }
 
       if (!list.length) {
-        html += \`<div class="q-card" style="text-align:center;color:#525252;">इस Date Range / डॉक्टर के लिए कोई बुकिंग नहीं मिली।</div>\`;
+        html += '<div class="q-card" style="text-align:center;color:#525252;">इस Date Range / डॉक्टर के लिए कोई बुकिंग नहीं मिली।</div>';
       } else {
-        list.forEach((b) => {
-          const st = String(b.Queue_Status || "Waiting").trim();
-          const cls = st.toLowerCase() === "in consultation"
+        list.forEach(function(b) {
+          var st = String(b.Queue_Status || "Waiting").trim();
+          var cls = st.toLowerCase() === "in consultation"
             ? "b-in-consultation"
             : st.toLowerCase() === "completed"
             ? "b-completed"
             : "b-waiting";
-          const tId = String(b.Token_ID || "");
-          const visitYmd = toYmd(b.Visit_Date);
-          const lockedPast = isPastDate(visitYmd);
-          const opdFee = Math.max(0, Number(b.OPD_Fee || 0));
-          const paidAmt = Math.max(0, Number(b.Paid_Amount || 0));
-          const balanceAmt = Math.max(0, opdFee - paidAmt);
-          const { online, cash } = splitPaidByChannel(b);
+          var tId = String(b.Token_ID || "");
+          var visitYmd = toYmd(b.Visit_Date);
+          var lockedPast = isPastDate(visitYmd);
+          var opdFee = Math.max(0, Number(b.OPD_Fee || 0));
+          var paidAmt = Math.max(0, Number(b.Paid_Amount || 0));
+          var balanceAmt = Math.max(0, opdFee - paidAmt);
+          var ch = splitPaidByChannel(b);
 
-          const metaLine = \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`;
+          var metaLine =
+            "👨‍⚕️ <b>" + escapeHtml(b.Doctor_Name || "") + "</b> | 📅 " + visitYmd + " | ⏰ " + escapeHtml(b.Batch_Slot || "") +
+            "<br>📱 " + escapeHtml(b.Patient_Phone || "") + " | 💳 " + escapeHtml(b.Payment_Status || "Paid") +
+            "<br>💰 Total: <b>₹" + opdFee + "</b> | Online: <b>₹" + ch.online + "</b> | Cash: <b>₹" + ch.cash + "</b> | Dues: <b style=\"color:" + (balanceAmt > 0 ? "#c5221f" : "#137333") + ';">₹' + balanceAmt + "</b>";
 
-          const disAttr = lockedPast ? "disabled" : "";
-          const cashBtnHtml = APP_ROLE === "reception"
-            ? \`<button class="btn btn-cash" \${disAttr} onclick="handleCashDeposit('\${tId}', \${balanceAmt}, '\${visitYmd}')">💵 Cash Deposit (Dues: ₹\${balanceAmt})</button>\`
+          var disAttr = lockedPast ? "disabled" : "";
+          var cashBtnHtml = APP_ROLE === "reception"
+            ? '<button class="btn btn-cash" ' + disAttr + " onclick=\"handleCashDeposit('" + escapeHtml(tId) + "', " + balanceAmt + ", '" + visitYmd + "')\">💵 Cash Deposit (Dues: ₹" + balanceAmt + ")</button>"
             : "";
 
-          const lockNoteHtml = lockedPast
-            ? \`<div style="margin-top:8px;font-size:12px;color:#b45309;font-weight:700;">🔒 पिछले दिन का रिकॉर्ड लॉक है (बदलाव बंद)</div>\`
+          var lockNoteHtml = lockedPast
+            ? '<div style="margin-top:8px;font-size:12px;color:#b45309;font-weight:700;">🔒 पिछले दिन का रिकॉर्ड लॉक है (बदलाव बंद)</div>'
             : "";
 
-          html += \`
-            <div class="q-card">
-              <div class="q-top">
-                <span class="token-pill">\${tId} — \${b.Patient_Name || ""} (\${b.Patient_Age || ""}y)</span>
-                <span class="badge \${cls}">\${st}</span>
-              </div>
-              <div class="q-meta">\${metaLine}</div>
-              <div class="q-actions">
-                <button class="btn btn-live" \${disAttr} onclick="setQueueStatus('\${tId}', 'In Consultation')">▶ In Consultation</button>
-                <button class="btn btn-done" \${disAttr} onclick="setQueueStatus('\${tId}', 'Completed')">✔ Completed</button>
-                <button class="btn btn-wait" \${disAttr} onclick="setQueueStatus('\${tId}', 'Waiting')">⏳ Waiting</button>
-              </div>
-              \${cashBtnHtml}
-              \${lockNoteHtml}
-            </div>
-          \`;
+          html +=
+            '<div class="q-card">' +
+            '<div class="q-top">' +
+            '<span class="token-pill">' + escapeHtml(tId) + " — " + escapeHtml(b.Patient_Name || "") + " (" + escapeHtml(b.Patient_Age || "") + "y)</span>" +
+            '<span class="badge ' + cls + '">' + escapeHtml(st) + "</span>" +
+            "</div>" +
+            '<div class="q-meta">' + metaLine + "</div>" +
+            '<div class="q-actions">' +
+            '<button class="btn btn-live" ' + disAttr + " onclick=\"setQueueStatus('" + escapeHtml(tId) + "', 'In Consultation')\">▶ In Consultation</button>" +
+            '<button class="btn btn-done" ' + disAttr + " onclick=\"setQueueStatus('" + escapeHtml(tId) + "', 'Completed')\">✔ Completed</button>" +
+            '<button class="btn btn-wait" ' + disAttr + " onclick=\"setQueueStatus('" + escapeHtml(tId) + "', 'Waiting')\">⏳ Waiting</button>" +
+            "</div>" +
+            cashBtnHtml + lockNoteHtml + "</div>";
         });
       }
 
