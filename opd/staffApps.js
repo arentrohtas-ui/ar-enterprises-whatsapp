@@ -130,8 +130,8 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
   const subtitleText = isDoctor
-    ? "Doctor App — कुल मरीज़, कुल राशि, कतार व Present/Absent"
-    : "Reception App — कतार, Cash Deposit व कुल शुल्क हिसाब";
+    ? "Doctor App — Total, Online, Cash, Dues व कतार"
+    : "Reception App — Total, Online, Cash, Dues व कतार";
   const todayIst = getTodayIstYmd();
   const iconUrl = resolveAppIconUrl(appRole);
   const manifestUrl = `/app-manifest.json?role=${encodeURIComponent(
@@ -270,8 +270,21 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       gap: 10px;
       flex-wrap: wrap;
     }
-    .banner-big { font-size: 20px; font-weight: 800; }
+    .banner-big { font-size: 19px; font-weight: 800; }
     .banner-small { font-size: 11px; opacity: 0.92; text-transform: uppercase; }
+    .acct-grid {
+      width: 100%;
+      border-top: 1px solid rgba(255, 255, 255, 0.22);
+      padding-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+    }
+    @media (min-width: 520px) {
+      .acct-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
 
     .q-card {
       background: var(--card);
@@ -378,57 +391,38 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
         <button class="btn btn-ghost" onclick="clearDateFilter()">सब तारीख</button>
       </div>
 
-      ${
-        isDoctor
-          ? `<div class="banner">
-              <div>
-                <div class="banner-small">CURRENT RUNNING TOKEN</div>
-                <div id="currentTokenText" class="banner-big">—</div>
-              </div>
-              <div>
-                <div class="banner-small">WAITING</div>
-                <div id="waitingCountText" class="banner-big">0</div>
-              </div>
-              <div style="text-align:right;">
-                <div class="banner-small">TOTAL PATIENTS</div>
-                <div id="totalPatientsText" class="banner-big">0</div>
-              </div>
-              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
-                <div>
-                  <div class="banner-small">TOTAL AMOUNT (कुल शुल्क)</div>
-                  <div id="totalAmountText" class="banner-big">₹0</div>
-                </div>
-              </div>
-            </div>`
-          : `<div class="banner">
-              <div>
-                <div class="banner-small">CURRENT RUNNING TOKEN</div>
-                <div id="currentTokenText" class="banner-big">—</div>
-              </div>
-              <div>
-                <div class="banner-small">WAITING</div>
-                <div id="waitingCountText" class="banner-big">0</div>
-              </div>
-              <div style="text-align:right;">
-                <div class="banner-small">TOTAL PATIENTS</div>
-                <div id="totalPatientsText" class="banner-big">0</div>
-              </div>
-              <div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-                <div>
-                  <div class="banner-small">TOTAL AMOUNT (कुल शुल्क)</div>
-                  <div id="totalAmountText" class="banner-big">₹0</div>
-                </div>
-                <div>
-                  <div class="banner-small">कुल दिया गया (PAID)</div>
-                  <div id="totalPaidText" class="banner-big">₹0</div>
-                </div>
-                <div style="text-align:right;">
-                  <div class="banner-small">कुल बाक़ी (BALANCE)</div>
-                  <div id="totalBalanceText" class="banner-big">₹0</div>
-                </div>
-              </div>
-            </div>`
-      }
+      <div class="banner">
+        <div>
+          <div class="banner-small">CURRENT RUNNING TOKEN</div>
+          <div id="currentTokenText" class="banner-big">—</div>
+        </div>
+        <div>
+          <div class="banner-small">WAITING</div>
+          <div id="waitingCountText" class="banner-big">0</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="banner-small">TOTAL PATIENTS</div>
+          <div id="totalPatientsText" class="banner-big">0</div>
+        </div>
+        <div class="acct-grid">
+          <div>
+            <div class="banner-small">TOTAL AMOUNT</div>
+            <div id="totalAmountText" class="banner-big">₹0</div>
+          </div>
+          <div>
+            <div class="banner-small">ONLINE</div>
+            <div id="totalOnlineText" class="banner-big">₹0</div>
+          </div>
+          <div>
+            <div class="banner-small">CASH</div>
+            <div id="totalCashText" class="banner-big">₹0</div>
+          </div>
+          <div>
+            <div class="banner-small">DUES (बाक़ी)</div>
+            <div id="totalBalanceText" class="banner-big">₹0</div>
+          </div>
+        </div>
+      </div>
 
       <div id="mainContent"></div>
     </div>
@@ -454,6 +448,27 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     function isPastDate(val) {
       const ymd = toYmd(val);
       return Boolean(ymd && ymd < TODAY_IST);
+    }
+
+    function splitPaidByChannel(booking) {
+      const paid = Math.max(0, Number(booking?.Paid_Amount || 0));
+      const explicitCash = Number(booking?.Cash_Amount ?? booking?.cashAmount ?? NaN);
+      const explicitOnline = Number(booking?.Online_Amount ?? booking?.onlineAmount ?? NaN);
+
+      if (Number.isFinite(explicitCash) || Number.isFinite(explicitOnline)) {
+        const cash = Number.isFinite(explicitCash) ? Math.max(0, explicitCash) : 0;
+        const online = Number.isFinite(explicitOnline)
+          ? Math.max(0, explicitOnline)
+          : Math.max(0, paid - cash);
+        return { online, cash };
+      }
+
+      const modeText = \`\${booking?.Payment_Mode || ""} \${booking?.Payment_Status || ""}\`.toLowerCase();
+      const isCash = modeText.includes("cash");
+      if (isCash) {
+        return { online: 0, cash: paid };
+      }
+      return { online: paid, cash: 0 };
     }
 
     function showToast(msg) {
@@ -573,7 +588,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       }
 
       const defaultAmt = currentBalance > 0 ? String(currentBalance) : "";
-      const entered = prompt(\`टोकन \${tokenId} के लिए Cash Deposit राशि (₹) डालें (बाक़ी: ₹\${currentBalance}):\`, defaultAmt);
+      const entered = prompt(\`टोकन \${tokenId} के लिए Cash Deposit राशि (₹) डालें (Dues: ₹\${currentBalance}):\`, defaultAmt);
       if (entered === null) return;
       const amt = Number(String(entered).trim());
       if (!Number.isFinite(amt) || amt <= 0) {
@@ -599,6 +614,20 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       }
       if (Array.isArray(d.bookings) && d.bookings.length) {
         state.bookings = d.bookings;
+      } else {
+        state.bookings = state.bookings.map((b) => {
+          if (String(b.Token_ID || "") !== String(tokenId)) return b;
+          const nextPaid = Number(b.Paid_Amount || 0) + amt;
+          const prevCash = Number(b.Cash_Amount || 0);
+          const modeLower = String(b.Payment_Mode || "").toLowerCase();
+          const nextCash = modeLower.includes("cash") || prevCash > 0 ? prevCash + amt : amt;
+          return {
+            ...b,
+            Paid_Amount: nextPaid,
+            Cash_Amount: nextCash,
+            Payment_Mode: b.Payment_Mode || "Cash",
+          };
+        });
       }
       showToast(\`💵 \${tokenId} में ₹\${amt} Cash Deposit दर्ज हुआ\`);
       renderView();
@@ -647,30 +676,28 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       );
 
       let sumTotal = 0;
-      let sumPaid = 0;
-      let sumBalance = 0;
+      let sumOnline = 0;
+      let sumCash = 0;
+      let sumDues = 0;
+
       list.forEach((b) => {
-        const fee = Number(b.OPD_Fee || 0);
-        const paid = Number(b.Paid_Amount || 0);
+        const fee = Math.max(0, Number(b.OPD_Fee || 0));
+        const paid = Math.max(0, Number(b.Paid_Amount || 0));
+        const { online, cash } = splitPaidByChannel(b);
         sumTotal += fee;
-        sumPaid += paid;
-        sumBalance += Math.max(0, fee - paid);
+        sumOnline += online;
+        sumCash += cash;
+        sumDues += Math.max(0, fee - paid);
       });
 
       document.getElementById("currentTokenText").textContent =
         running ? \`\${running.Token_ID} (\${running.Patient_Name})\` : "कोई नहीं / None";
       document.getElementById("waitingCountText").textContent = String(waitingList.length);
       document.getElementById("totalPatientsText").textContent = String(list.length);
-
-      const totEl = document.getElementById("totalAmountText");
-      if (totEl) totEl.textContent = \`₹\${sumTotal}\`;
-
-      if (APP_ROLE === "reception") {
-        const paidEl = document.getElementById("totalPaidText");
-        const balEl = document.getElementById("totalBalanceText");
-        if (paidEl) paidEl.textContent = \`₹\${sumPaid}\`;
-        if (balEl) balEl.textContent = \`₹\${sumBalance}\`;
-      }
+      document.getElementById("totalAmountText").textContent = \`₹\${sumTotal}\`;
+      document.getElementById("totalOnlineText").textContent = \`₹\${sumOnline}\`;
+      document.getElementById("totalCashText").textContent = \`₹\${sumCash}\`;
+      document.getElementById("totalBalanceText").textContent = \`₹\${sumDues}\`;
 
       const container = document.getElementById("mainContent");
       let html = "";
@@ -709,17 +736,18 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
           const tId = String(b.Token_ID || "");
           const visitYmd = toYmd(b.Visit_Date);
           const lockedPast = isPastDate(visitYmd);
-          const opdFee = Number(b.OPD_Fee || 0);
-          const paidAmt = Number(b.Paid_Amount || 0);
+          const opdFee = Math.max(0, Number(b.OPD_Fee || 0));
+          const paidAmt = Math.max(0, Number(b.Paid_Amount || 0));
           const balanceAmt = Math.max(0, opdFee - paidAmt);
+          const { online, cash } = splitPaidByChannel(b);
 
           const metaLine = APP_ROLE === "reception"
-            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
-            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Fee: <b>₹\${opdFee}</b>\`;
+            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
+            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`;
 
           const disAttr = lockedPast ? "disabled" : "";
           const cashBtnHtml = APP_ROLE === "reception"
-            ? \`<button class="btn btn-cash" \${disAttr} onclick="handleCashDeposit('\${tId}', \${balanceAmt}, '\${visitYmd}')">💵 Cash Deposit (बाक़ी: ₹\${balanceAmt})</button>\`
+            ? \`<button class="btn btn-cash" \${disAttr} onclick="handleCashDeposit('\${tId}', \${balanceAmt}, '\${visitYmd}')">💵 Cash Deposit (Dues: ₹\${balanceAmt})</button>\`
             : "";
 
           const lockNoteHtml = lockedPast
