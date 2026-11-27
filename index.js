@@ -6,10 +6,17 @@ const app = express();
 app.use(express.json());
 
 const sessions = new Map();
+const pendingPayments = new Map();
+const issuedOrderTokens = new Map();
+
 const GAS_WEBAPP_URL = String(process.env.GAS_WEBAPP_URL || "").trim();
-const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "ar_opd_verify_token").trim();
+const VERIFY_TOKEN = String(
+  process.env.VERIFY_TOKEN || "ar_opd_verify_token"
+).trim();
 const CRON_SECRET = String(process.env.CRON_SECRET || "").trim();
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const TOKEN_PREFIX = "OPD_";
+const TOKEN_START_NUMBER = 101;
 
 function getTodayIstYmd() {
   const ist = new Date(Date.now() + IST_OFFSET_MS);
@@ -17,6 +24,12 @@ function getTodayIstYmd() {
   const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
   const d = String(ist.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+
+function formatPhoneWith91(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
 }
 
 function getSessionKey(phoneId, from) {
@@ -50,13 +63,23 @@ async function callGas(method = "GET", paramsOrBody = {}) {
 function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
   return {
     id: String(raw.Business_ID || raw.businessId || raw.id || "").trim(),
-    name: String(raw.Business_Name || raw.businessName || raw.name || "OPD Clinic").trim(),
+    name: String(
+      raw.Business_Name || raw.businessName || raw.name || "OPD Clinic"
+    ).trim(),
     category: String(raw.Category || raw.category || "opd").trim(),
     phoneId: String(
-      raw.Phone_Number_ID || raw.phoneNumberId || raw.phoneId || fallbackPhoneId || ""
+      raw.Phone_Number_ID ||
+        raw.phoneNumberId ||
+        raw.phoneId ||
+        fallbackPhoneId ||
+        ""
     ).trim(),
     token: String(
-      raw.WhatsApp_Token || raw.whatsappToken || raw.token || process.env.WA_TOKEN || ""
+      raw.WhatsApp_Token ||
+        raw.whatsappToken ||
+        raw.token ||
+        process.env.WA_TOKEN ||
+        ""
     ).trim(),
     sheetId: String(
       raw.Client_Sheet_ID ||
@@ -80,7 +103,10 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
         ""
     ).trim(),
     advanceAmount: Number(
-      raw.Advance_Amount ?? raw.advanceAmount ?? process.env.DEFAULT_ADVANCE_AMOUNT ?? 0
+      raw.Advance_Amount ??
+        raw.advanceAmount ??
+        process.env.DEFAULT_ADVANCE_AMOUNT ??
+        0
     ),
     status: String(raw.Status || raw.status || "ACTIVE").trim().toUpperCase(),
   };
@@ -99,11 +125,20 @@ async function getActiveClients() {
     .filter((c) => c.status !== "INACTIVE" && c.status !== "DISABLED");
 }
 
-async function resolveBusiness(phoneNumberId) {
+async function resolveBusiness(phoneNumberId, sheetId = "") {
   const clients = await getActiveClients();
 
+  if (sheetId) {
+    const bySheet = clients.find(
+      (c) => String(c.sheetId || "").trim() === String(sheetId || "").trim()
+    );
+    if (bySheet) return bySheet;
+  }
+
   const matched = clients.find(
-    (c) => phoneNumberId && String(c.phoneId).trim() === String(phoneNumberId).trim()
+    (c) =>
+      phoneNumberId &&
+      String(c.phoneId).trim() === String(phoneNumberId).trim()
   );
 
   return (
@@ -114,7 +149,7 @@ async function resolveBusiness(phoneNumberId) {
         Business_Name: "OPD Clinic",
         Phone_Number_ID: phoneNumberId || "",
         WhatsApp_Token: process.env.WA_TOKEN || "",
-        Client_Sheet_ID: process.env.DEFAULT_CLINIC_SHEET_ID || "",
+        Client_Sheet_ID: sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || "",
         Advance_Amount: Number(process.env.DEFAULT_ADVANCE_AMOUNT || 0),
         Status: "ACTIVE",
       },
@@ -124,11 +159,10 @@ async function resolveBusiness(phoneNumberId) {
 }
 
 async function sendWhatsAppText(business, toPhone, body) {
-  const digits = String(toPhone || "").replace(/\D/g, "");
-  const recipient = digits.length === 10 ? `91${digits}` : digits;
+  const recipient = formatPhoneWith91(toPhone);
 
-  if (!business.phoneId || !business.token || !recipient) {
-    console.log("[WA REMINDER SIMULATED]", business.name, recipient, body);
+  if (!business?.phoneId || !business?.token || !recipient) {
+    console.log("[WA TEXT SIMULATED]", business?.name, recipient, body);
     return { ok: true, simulated: true };
   }
 
@@ -149,6 +183,134 @@ async function sendWhatsAppText(business, toPhone, body) {
     }
   );
   return r.json();
+}
+
+function extractNextOpdTokenFromRows(existingRows = []) {
+  let maxNum = TOKEN_START_NUMBER - 1;
+  for (const r of existingRows) {
+    const rawId = String(r?.Token_ID || r?.tokenId || "").trim();
+    const match = rawId.match(/^OPD_(\d+)$/i);
+    if (match) {
+      const n = Number(match[1]);
+      if (!Number.isNaN(n) && n > maxNum) {
+        maxNum = n;
+      }
+    }
+  }
+  return `${TOKEN_PREFIX}${Math.max(TOKEN_START_NUMBER, maxNum + 1)}`;
+}
+
+async function getNextOpdTokenForSheet(sheetId) {
+  try {
+    const res = await callGas("GET", {
+      action: "get_live_status",
+      spreadsheet_id: sheetId,
+      tokenId: "",
+      phone: "",
+    });
+    const rows = Array.isArray(res?.bookings)
+      ? res.bookings
+      : Array.isArray(res?.allBookings)
+      ? res.allBookings
+      : Array.isArray(res?.data)
+      ? res.data
+      : [];
+    return extractNextOpdTokenFromRows(rows);
+  } catch (_) {
+    return `${TOKEN_PREFIX}${TOKEN_START_NUMBER}`;
+  }
+}
+
+async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
+  const cleanOrderId = String(orderId || "").trim();
+  if (!cleanOrderId) return { ok: false, reason: "Missing orderId" };
+
+  if (issuedOrderTokens.has(cleanOrderId)) {
+    return { ok: true, alreadyIssued: true, tokenId: issuedOrderTokens.get(cleanOrderId) };
+  }
+
+  const pending = pendingPayments.get(cleanOrderId);
+  if (!pending) {
+    return { ok: false, reason: "Pending payment record not found" };
+  }
+
+  const business = await resolveBusiness(
+    pending.business?.phoneId || "",
+    pending.sheetId || pending.business?.sheetId || ""
+  );
+  const sheetId = String(
+    pending.sheetId || business.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
+  ).trim();
+
+  const tokenId = await getNextOpdTokenForSheet(sheetId);
+  const doc = pending.selectedDoctor || {};
+  const opdFee = Number(doc.opdFee ?? pending.opdFee ?? 0);
+  const payableAmount = Number(pending.payableAmount ?? opdFee);
+  const lang = pending.lang === "en" ? "en" : "hi";
+  const dayLabel = pending.dayInfo?.shortLabel || "";
+  const visitDate = String(pending.visitDate || "").slice(0, 10);
+  const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+  const bizName = business.name || pending.businessName || "City Care OPD";
+
+  await callGas("POST", {
+    action: "create_booking",
+    spreadsheetId: sheetId,
+    spreadsheet_id: sheetId,
+    tokenId,
+    patientName: pending.patientName,
+    patientAge: pending.patientAge,
+    patientPhone: pending.patientPhone,
+    doctorId: doc.id || "",
+    doctorName: doc.name || "",
+    visitDate,
+    batchSlot: pending.batchSlot,
+    opdFee,
+    advanceFee: payableAmount,
+    paidAmount: payableAmount,
+    queueStatus: "Waiting",
+    paymentStatus: "Paid",
+    greetingSent: "Yes",
+    paymentLinkId: cleanOrderId,
+    paymentRefId: paymentRefId || cleanOrderId,
+  });
+
+  issuedOrderTokens.set(cleanOrderId, tokenId);
+  pendingPayments.delete(cleanOrderId);
+
+  if (pending.sessionKey && sessions.has(pending.sessionKey)) {
+    const prevSess = sessions.get(pending.sessionKey);
+    sessions.set(pending.sessionKey, {
+      lang: prevSess.lang || lang,
+      step: null,
+      data: {},
+    });
+  }
+
+  const confirmMsg =
+    lang === "en"
+      ? `✅ *Payment Received — OPD Token Confirmed*\n\n` +
+        `• Token No.: *${tokenId}*\n` +
+        `• Patient: *${pending.patientName}* (${pending.patientAge} yrs)\n` +
+        `• Mobile: *${pending.patientPhone}*\n` +
+        `• Date: *${dayText}*\n` +
+        `• Doctor: *${doc.name}*\n` +
+        `• Time Slot: *${pending.batchSlot}*\n` +
+        `• Paid Amount: *₹${payableAmount}*\n` +
+        `• Status: *Paid*`
+      : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n` +
+        `• टोकन नंबर: *${tokenId}*\n` +
+        `• मरीज़: *${pending.patientName}* (${pending.patientAge} वर्ष)\n` +
+        `• मोबाइल: *${pending.patientPhone}*\n` +
+        `• तारीख: *${dayText}*\n` +
+        `• डॉक्टर: *${doc.name}*\n` +
+        `• समय स्लॉट: *${pending.batchSlot}*\n` +
+        `• भुगतान राशि: *₹${payableAmount}*\n` +
+        `• स्टेटस: *Paid*`;
+
+  const waTarget = pending.patientPhone || pending.from;
+  await sendWhatsAppText(business, waTarget, confirmMsg);
+
+  return { ok: true, tokenId, orderId: cleanOrderId };
 }
 
 function buildCtx(business, from) {
@@ -174,6 +336,15 @@ function buildCtx(business, from) {
         data: {},
       });
     },
+    registerPendingPayment: (orderId, payload) => {
+      if (!orderId) return;
+      pendingPayments.set(String(orderId).trim(), {
+        ...payload,
+        from,
+        business,
+        sessionKey: key,
+      });
+    },
     getSheet: (params) =>
       callGas("GET", { ...params, spreadsheet_id: business.sheetId }),
     postSheet: (payload) =>
@@ -188,8 +359,9 @@ function buildCtx(business, from) {
       }),
     sendText: (body) => sendWhatsAppText(business, from, body),
     sendWA: async (payload) => {
-      if (!business.phoneId || !business.token) {
-        console.log("[WA INTERACTIVE]", from, JSON.stringify(payload));
+      const recipient = formatPhoneWith91(from);
+      if (!business.phoneId || !business.token || !recipient) {
+        console.log("[WA INTERACTIVE]", recipient, JSON.stringify(payload));
         return { ok: true, simulated: true };
       }
       const r = await fetch(
@@ -202,7 +374,7 @@ function buildCtx(business, from) {
           },
           body: JSON.stringify({
             messaging_product: "whatsapp",
-            to: from,
+            to: recipient,
             ...payload,
           }),
         }
@@ -308,8 +480,58 @@ app.get("/webhook/whatsapp", (req, res) => {
   return res.status(403).send("Forbidden");
 });
 
-// Cashfree Webhook Endpoint
-app.post("/webhook/cashfree", handleCashfreeWebhook);
+// Cashfree Auto-Confirmation Webhook Endpoint
+app.post("/webhook/cashfree", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const eventType = String(
+      body.type || body.event || body.event_type || ""
+    ).toUpperCase();
+
+    const orderId = String(
+      body.data?.order?.order_id ||
+        body.data?.link?.link_id ||
+        body.order?.order_id ||
+        body.link_id ||
+        body.order_id ||
+        ""
+    ).trim();
+
+    const paymentStatus = String(
+      body.data?.payment?.payment_status ||
+        body.data?.order?.order_status ||
+        body.payment_status ||
+        body.order_status ||
+        ""
+    ).toUpperCase();
+
+    const paymentRefId = String(
+      body.data?.payment?.cf_payment_id ||
+        body.data?.payment?.bank_reference ||
+        body.cf_payment_id ||
+        ""
+    ).trim();
+
+    const isPaid =
+      eventType.includes("SUCCESS") ||
+      eventType.includes("PAID") ||
+      ["SUCCESS", "PAID", "COMPLETED"].includes(paymentStatus);
+
+    if (isPaid && orderId && pendingPayments.has(orderId)) {
+      const issued = await confirmPendingBookingByOrderId(orderId, paymentRefId);
+      return res.status(200).json({ ok: true, autoConfirmed: issued });
+    }
+
+    if (typeof handleCashfreeWebhook === "function") {
+      return await handleCashfreeWebhook(req, res);
+    }
+
+    return res.status(200).json({ ok: true, received: true });
+  } catch (err) {
+    console.error("Cashfree Webhook Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // Meta WhatsApp Incoming Message Endpoint
 app.post("/webhook/whatsapp", async (req, res) => {
