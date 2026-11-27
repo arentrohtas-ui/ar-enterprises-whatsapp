@@ -47,6 +47,12 @@ function getTodayIstYmd() {
   return formatIstYmd(new Date());
 }
 
+function isPastDateYmd(dateStr) {
+  const ymd = normalizeDateYmd(dateStr);
+  if (!ymd) return false;
+  return ymd < getTodayIstYmd();
+}
+
 function formatPhoneWith91(phone) {
   const digits = String(phone || "").replace(/\D/g, "");
   if (digits.length === 10) return `91${digits}`;
@@ -79,6 +85,26 @@ async function callGas(method = "GET", paramsOrBody = {}) {
     body: JSON.stringify(paramsOrBody),
   });
   return r.json();
+}
+
+async function findBookingByTokenId(sheetId, tokenId) {
+  try {
+    const dataRes = await callGas("GET", {
+      action: "get_dashboard_data",
+      spreadsheet_id: sheetId,
+      spreadsheetId: sheetId,
+    });
+    const list = Array.isArray(dataRes?.bookings) ? dataRes.bookings : [];
+    const target = String(tokenId || "").trim().toLowerCase();
+    return (
+      list.find(
+        (b) =>
+          String(b.Token_ID || b.tokenId || "").trim().toLowerCase() === target
+      ) || null
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
 function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
@@ -803,6 +829,14 @@ app.post("/api/app/queue-status", async (req, res) => {
         .json({ ok: false, error: "sheetId, tokenId, queueStatus required" });
     }
 
+    const existingBooking = await findBookingByTokenId(sheetId, tokenId);
+    if (existingBooking && isPastDateYmd(existingBooking.Visit_Date)) {
+      return res.status(403).json({
+        ok: false,
+        error: "पिछले दिन (Past Date) के रिकॉर्ड में बदलाव की अनुमति नहीं है।",
+      });
+    }
+
     const gasRes = await callGas("POST", {
       action: "update_queue_status",
       spreadsheetId: sheetId,
@@ -854,6 +888,14 @@ app.post("/api/app/cash-deposit", async (req, res) => {
         .json({ ok: false, error: "Valid sheetId, tokenId, and amount required" });
     }
 
+    const existingBooking = await findBookingByTokenId(sheetId, tokenId);
+    if (existingBooking && isPastDateYmd(existingBooking.Visit_Date)) {
+      return res.status(403).json({
+        ok: false,
+        error: "पिछले दिन (Past Date) के रिकॉर्ड में Cash Deposit नहीं किया जा सकता।",
+      });
+    }
+
     const gasRes = await callGas("POST", {
       action: "record_cash_deposit",
       spreadsheetId: sheetId,
@@ -887,6 +929,13 @@ app.post("/api/app/doctor-avail", async (req, res) => {
         .json({ ok: false, error: "sheetId, dayKey, avail required" });
     }
 
+    if (String(dayKey || "").toLowerCase() === "past") {
+      return res.status(403).json({
+        ok: false,
+        error: "पिछले दिन की उपलब्धता नहीं बदली जा सकती।",
+      });
+    }
+
     const gasRes = await callGas("POST", {
       action: "update_doctor_avail",
       spreadsheetId: sheetId,
@@ -911,6 +960,7 @@ function renderStandaloneAppHtml(appRole) {
   const subtitleText = isDoctor
     ? "Doctor App — कुल मरीज़, कुल राशि, कतार व Present/Absent"
     : "Reception App — कतार, Cash Deposit व कुल शुल्क हिसाब";
+  const todayIst = getTodayIstYmd();
 
   return `<!doctype html>
 <html lang="hi">
@@ -982,6 +1032,10 @@ function renderStandaloneAppHtml(appRole) {
       align-items: center;
       justify-content: center;
       gap: 6px;
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
     .btn-primary { background: var(--primary); color: #fff; width: 100%; }
     .btn-primary:active { background: var(--primary-dark); }
@@ -1200,6 +1254,7 @@ function renderStandaloneAppHtml(appRole) {
 
   <script>
     const APP_ROLE = "${appRole}";
+    const TODAY_IST = "${todayIst}";
     let PIN = "";
     let state = { clinic: null, doctors: [], bookings: [] };
 
@@ -1211,6 +1266,11 @@ function renderStandaloneAppHtml(appRole) {
       const dmy = s.match(/^(\\d{1,2})[-/](\\d{1,2})[-/](\\d{4})/);
       if (dmy) return \`\${dmy[3]}-\${String(dmy[2]).padStart(2, "0")}-\${String(dmy[1]).padStart(2, "0")}\`;
       return s.slice(0, 10);
+    }
+
+    function isPastDate(val) {
+      const ymd = toYmd(val);
+      return Boolean(ymd && ymd < TODAY_IST);
     }
 
     function showToast(msg) {
@@ -1283,6 +1343,12 @@ function renderStandaloneAppHtml(appRole) {
     }
 
     async function setQueueStatus(tokenId, queueStatus) {
+      const target = state.bookings.find((b) => String(b.Token_ID || "") === String(tokenId));
+      if (target && isPastDate(target.Visit_Date)) {
+        showToast("🔒 पिछले दिन के रिकॉर्ड में बदलाव की अनुमति नहीं है");
+        return;
+      }
+
       const r = await fetch("/api/app/queue-status", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
@@ -1306,7 +1372,12 @@ function renderStandaloneAppHtml(appRole) {
       renderView();
     }
 
-    async function handleCashDeposit(tokenId, currentBalance) {
+    async function handleCashDeposit(tokenId, currentBalance, visitDate) {
+      if (isPastDate(visitDate)) {
+        showToast("🔒 पिछले दिन के रिकॉर्ड में Cash Deposit बंद है");
+        return;
+      }
+
       const defaultAmt = currentBalance > 0 ? String(currentBalance) : "";
       const entered = prompt(\`टोकन \${tokenId} के लिए Cash Deposit राशि (₹) डालें (बाक़ी: ₹\${currentBalance}):\`, defaultAmt);
       if (entered === null) return;
@@ -1353,7 +1424,7 @@ function renderStandaloneAppHtml(appRole) {
       });
       const d = await r.json();
       if (!r.ok || !d.ok) {
-        showToast("Availability update failed");
+        showToast(d.error || "Availability update failed");
         return;
       }
       await loadAllData();
@@ -1438,16 +1509,23 @@ function renderStandaloneAppHtml(appRole) {
             ? "b-completed"
             : "b-waiting";
           const tId = String(b.Token_ID || "");
+          const visitYmd = toYmd(b.Visit_Date);
+          const lockedPast = isPastDate(visitYmd);
           const opdFee = Number(b.OPD_Fee || 0);
           const paidAmt = Number(b.Paid_Amount || 0);
           const balanceAmt = Math.max(0, opdFee - paidAmt);
 
           const metaLine = APP_ROLE === "reception"
-            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
-            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Fee: <b>₹\${opdFee}</b>\`;
+            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
+            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Fee: <b>₹\${opdFee}</b>\`;
 
+          const disAttr = lockedPast ? "disabled" : "";
           const cashBtnHtml = APP_ROLE === "reception"
-            ? \`<button class="btn btn-cash" onclick="handleCashDeposit('\${tId}', \${balanceAmt})">💵 Cash Deposit (बाक़ी: ₹\${balanceAmt})</button>\`
+            ? \`<button class="btn btn-cash" \${disAttr} onclick="handleCashDeposit('\${tId}', \${balanceAmt}, '\${visitYmd}')">💵 Cash Deposit (बाक़ी: ₹\${balanceAmt})</button>\`
+            : "";
+
+          const lockNoteHtml = lockedPast
+            ? \`<div style="margin-top:8px;font-size:12px;color:#b45309;font-weight:700;">🔒 पिछले दिन का रिकॉर्ड लॉक है (बदलाव बंद)</div>\`
             : "";
 
           html += \`
@@ -1458,11 +1536,12 @@ function renderStandaloneAppHtml(appRole) {
               </div>
               <div class="q-meta">\${metaLine}</div>
               <div class="q-actions">
-                <button class="btn btn-live" onclick="setQueueStatus('\${tId}', 'In Consultation')">▶ In Consultation</button>
-                <button class="btn btn-done" onclick="setQueueStatus('\${tId}', 'Completed')">✔ Completed</button>
-                <button class="btn btn-wait" onclick="setQueueStatus('\${tId}', 'Waiting')">⏳ Waiting</button>
+                <button class="btn btn-live" \${disAttr} onclick="setQueueStatus('\${tId}', 'In Consultation')">▶ In Consultation</button>
+                <button class="btn btn-done" \${disAttr} onclick="setQueueStatus('\${tId}', 'Completed')">✔ Completed</button>
+                <button class="btn btn-wait" \${disAttr} onclick="setQueueStatus('\${tId}', 'Waiting')">⏳ Waiting</button>
               </div>
               \${cashBtnHtml}
+              \${lockNoteHtml}
             </div>
           \`;
         });
