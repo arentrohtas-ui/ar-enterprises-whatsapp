@@ -223,6 +223,57 @@ async function getNextOpdTokenForSheet(sheetId) {
   }
 }
 
+async function recordPaidBookingAndLog({
+  sheetId,
+  tokenId,
+  patientName,
+  patientAge,
+  patientPhone,
+  doctorId,
+  doctorName,
+  visitDate,
+  batchSlot,
+  opdFee,
+  advanceFee,
+  paidAmount,
+  paymentLinkId,
+  paymentRefId,
+}) {
+  await callGas("POST", {
+    action: "create_booking",
+    spreadsheetId: sheetId,
+    spreadsheet_id: sheetId,
+    tokenId,
+    patientName,
+    patientAge,
+    patientPhone,
+    doctorId: doctorId || "",
+    doctorName: doctorName || "",
+    visitDate,
+    batchSlot,
+    opdFee,
+    advanceFee,
+    paidAmount,
+    queueStatus: "Waiting",
+    paymentStatus: "Paid",
+    greetingSent: "Yes",
+    paymentLinkId: paymentLinkId || paymentRefId || "",
+    paymentRefId: paymentRefId || paymentLinkId || "",
+  });
+
+  await callGas("POST", {
+    action: "mark_payment_paid",
+    spreadsheetId: sheetId,
+    spreadsheet_id: sheetId,
+    tokenId,
+    patientName,
+    patientPhone,
+    paidAmount,
+    paymentRefId: paymentRefId || paymentLinkId || "",
+    cfPaymentId: paymentRefId || "",
+  });
+}
+
 async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   const cleanOrderId = String(orderId || "").trim();
   if (!cleanOrderId) return { ok: false, reason: "Missing orderId" };
@@ -259,11 +310,10 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   const dayLabel = pending.dayInfo?.shortLabel || "";
   const visitDate = String(pending.visitDate || "").slice(0, 10);
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+  const finalRefId = paymentRefId || cleanOrderId;
 
-  await callGas("POST", {
-    action: "create_booking",
-    spreadsheetId: sheetId,
-    spreadsheet_id: sheetId,
+  await recordPaidBookingAndLog({
+    sheetId,
     tokenId,
     patientName: pending.patientName,
     patientAge: pending.patientAge,
@@ -275,11 +325,8 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
     opdFee,
     advanceFee: payableAmount,
     paidAmount: payableAmount,
-    queueStatus: "Waiting",
-    paymentStatus: "Paid",
-    greetingSent: "Yes",
     paymentLinkId: cleanOrderId,
-    paymentRefId: paymentRefId || cleanOrderId,
+    paymentRefId: finalRefId,
   });
 
   issuedOrderTokens.set(cleanOrderId, tokenId);
@@ -441,6 +488,12 @@ function buildCtx(business, from) {
       callGas("GET", { ...params, spreadsheet_id: business.sheetId }),
     postSheet: (payload) =>
       callGas("POST", { ...payload, spreadsheetId: business.sheetId }),
+    recordPaidBookingAndLog: (opts) =>
+      recordPaidBookingAndLog({
+        ...opts,
+        spreadsheetId: opts?.spreadsheetId || business.sheetId,
+        sheetId: opts?.sheetId || business.sheetId,
+      }),
     createRazorpayLink: (opts) =>
       createCashfreeLink({
         ...opts,
