@@ -594,21 +594,20 @@ async function handleBookingStep(ctx, text, btnId) {
     const digits = isSelfBtn
       ? String(ctx.from || "").replace(/\D/g, "")
       : cleanText.replace(/\D/g, "");
-    const tenDigit =
-      digits.length >= 10 ? digits.slice(-10) : digits;
+    const tenDigit = digits.length >= 10 ? digits.slice(-10) : digits;
 
     if (tenDigit.length !== 10) {
       await sendPhonePromptWithSelfOption(ctx, lang);
       return;
     }
 
-    const normalizedDoc = normalizeDoctorObj(data.selectedDoctor || {});
-    await initiatePaymentOrBooking(
-      ctx,
-      { ...data, selectedDoctor: normalizedDoc },
-      tenDigit,
-      lang
-    );
+    const updatedData = {
+      ...data,
+      patientPhone: tenDigit,
+      selectedDoctor: normalizeDoctorObj(data.selectedDoctor || {}),
+    };
+    ctx.setSession({ lang, step, data: updatedData });
+    await initiatePaymentOrBooking(ctx, updatedData, tenDigit, lang);
     return;
   }
 
