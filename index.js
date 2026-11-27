@@ -93,6 +93,7 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
         raw.cashfreeAppId ||
         raw.Cashfree_Key_ID ||
         raw.cashfreeKeyId ||
+        process.env.CASHFREE_APP_ID ||
         ""
     ).trim(),
     cashfreeSecretKey: String(
@@ -100,6 +101,7 @@ function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
         raw.cashfreeSecretKey ||
         raw.Cashfree_Key_Secret ||
         raw.cashfreeKeySecret ||
+        process.env.CASHFREE_SECRET_KEY ||
         ""
     ).trim(),
     advanceAmount: Number(
@@ -319,6 +321,79 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   return { ok: true, tokenId, orderId: cleanOrderId };
 }
 
+async function verifyCashfreeOrderDirect({
+  orderId,
+  cashfreeAppId,
+  cashfreeSecretKey,
+}) {
+  const cleanId = String(orderId || "").trim();
+  const appId = String(
+    cashfreeAppId || process.env.CASHFREE_APP_ID || ""
+  ).trim();
+  const secretKey = String(
+    cashfreeSecretKey || process.env.CASHFREE_SECRET_KEY || ""
+  ).trim();
+
+  if (!cleanId || !appId || !secretKey) {
+    return { status: "UNVERIFIED" };
+  }
+
+  const envMode = String(process.env.CASHFREE_ENV || "").toLowerCase();
+  const bases =
+    envMode === "sandbox"
+      ? ["https://sandbox.cashfree.com/pg", "https://api.cashfree.com/pg"]
+      : ["https://api.cashfree.com/pg", "https://sandbox.cashfree.com/pg"];
+
+  for (const base of bases) {
+    const endpoints = [
+      `${base}/orders/${encodeURIComponent(cleanId)}`,
+      `${base}/links/${encodeURIComponent(cleanId)}`,
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const resp = await fetch(url, {
+          method: "GET",
+          headers: {
+            "x-client-id": appId,
+            "x-client-secret": secretKey,
+            "x-api-version": "2023-08-01",
+            Accept: "application/json",
+          },
+        });
+        if (!resp.ok) continue;
+        const data = await resp.json();
+
+        const st = String(
+          data?.order_status ||
+            data?.link_status ||
+            data?.payment_status ||
+            ""
+        ).toUpperCase();
+
+        const isPaid =
+          ["PAID", "SUCCESS", "COMPLETED"].includes(st) ||
+          Number(data?.link_amount_paid || 0) > 0;
+
+        if (isPaid) {
+          return {
+            status: "PAID",
+            cf_payment_id:
+              data?.cf_order_id ||
+              data?.link_id ||
+              data?.cf_payment_id ||
+              cleanId,
+          };
+        }
+      } catch (_) {
+        // try next endpoint
+      }
+    }
+  }
+
+  return { status: "PENDING" };
+}
+
 function buildCtx(business, from) {
   const key = getSessionKey(business.phoneId, from);
 
@@ -356,6 +431,12 @@ function buildCtx(business, from) {
       issuedOrderTokens.has(String(orderId || "").trim()),
     getIssuedTokenForOrder: (orderId) =>
       issuedOrderTokens.get(String(orderId || "").trim()) || "",
+    checkCashfreePaymentStatus: (opts) =>
+      verifyCashfreeOrderDirect({
+        ...opts,
+        cashfreeAppId: opts?.cashfreeAppId || business.cashfreeAppId,
+        cashfreeSecretKey: opts?.cashfreeSecretKey || business.cashfreeSecretKey,
+      }),
     getSheet: (params) =>
       callGas("GET", { ...params, spreadsheet_id: business.sheetId }),
     postSheet: (payload) =>
@@ -499,14 +580,19 @@ app.post("/webhook/cashfree", async (req, res) => {
       body.type || body.event || body.event_type || ""
     ).toUpperCase();
 
-    const orderId = String(
-      body.data?.order?.order_id ||
-        body.data?.link?.link_id ||
-        body.order?.order_id ||
-        body.link_id ||
-        body.order_id ||
-        ""
-    ).trim();
+    const candidateIds = [
+      body.data?.order?.order_id,
+      body.data?.link?.link_id,
+      body.data?.payment?.order_id,
+      body.order?.order_id,
+      body.link_id,
+      body.order_id,
+    ]
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+
+    const matchedOrderId =
+      candidateIds.find((id) => pendingPayments.has(id)) || candidateIds[0] || "";
 
     const paymentStatus = String(
       body.data?.payment?.payment_status ||
@@ -528,8 +614,11 @@ app.post("/webhook/cashfree", async (req, res) => {
       eventType.includes("PAID") ||
       ["SUCCESS", "PAID", "COMPLETED"].includes(paymentStatus);
 
-    if (isPaid && orderId && pendingPayments.has(orderId)) {
-      const issued = await confirmPendingBookingByOrderId(orderId, paymentRefId);
+    if (isPaid && matchedOrderId && pendingPayments.has(matchedOrderId)) {
+      const issued = await confirmPendingBookingByOrderId(
+        matchedOrderId,
+        paymentRefId
+      );
       return res.status(200).json({ ok: true, autoConfirmed: issued });
     }
 
