@@ -130,8 +130,8 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
   const pageTitle = isDoctor ? "Doctor App" : "Reception App";
   const headerIcon = isDoctor ? "🩺" : "💻";
   const subtitleText = isDoctor
-    ? "Doctor App — Total, Online, Cash, Dues व कतार"
-    : "Reception App — Total, Online, Cash, Dues व कतार";
+    ? "Doctor App — Date Range, Total, Online, Cash, Dues व PDF"
+    : "Reception App — Date Range, Total, Online, Cash, Dues व PDF";
   const todayIst = getTodayIstYmd();
   const iconUrl = resolveAppIconUrl(appRole);
   const manifestUrl = `/app-manifest.json?role=${encodeURIComponent(
@@ -206,8 +206,8 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     .btn {
       border: none;
       border-radius: 12px;
-      padding: 11px 13px;
-      font-size: 13.5px;
+      padding: 10px 12px;
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
@@ -225,6 +225,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     .btn-done { background: #3730a3; color: #fff; flex: 1; }
     .btn-wait { background: #b45309; color: #fff; flex: 1; }
     .btn-cash { background: #0f766e; color: #fff; width: 100%; margin-top: 8px; }
+    .btn-pdf { background: #111827; color: #fff; }
     .btn-ghost { background: #eef2f7; color: var(--text); }
 
     .topbar {
@@ -242,20 +243,37 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     .topbar-title { font-size: 17px; font-weight: 700; margin: 0; }
     .topbar-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
-    .container { max-width: 720px; margin: 0 auto; padding: 14px; }
-    .filters {
-      display: grid;
-      grid-template-columns: 1fr 1fr auto;
-      gap: 8px;
+    .container { max-width: 760px; margin: 0 auto; padding: 14px; }
+    .filter-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 10px;
       margin-bottom: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    @media (min-width: 600px) {
+      .filter-box {
+        grid-template-columns: 1fr 1fr 1.2fr auto auto;
+        align-items: end;
+      }
+    }
+    .f-group label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 4px;
     }
     select, input[type="date"] {
       width: 100%;
-      padding: 10px 12px;
-      border-radius: 12px;
+      padding: 9px 10px;
+      border-radius: 10px;
       border: 1px solid var(--border);
-      background: var(--card);
-      font-size: 14px;
+      background: #f8fafc;
+      font-size: 13.5px;
       color: var(--text);
     }
     .banner {
@@ -341,6 +359,46 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     .chip-p { background: #e6f4ea; color: #137333; border-color: #b7e1cd; }
     .chip-a { background: #fce8e6; color: #c5221f; border-color: #fad2cf; }
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      z-index: 60;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-box {
+      width: 100%;
+      max-width: 420px;
+      background: var(--card);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22);
+    }
+    .modal-box h3 { margin: 0 0 6px; font-size: 17px; }
+    .modal-box p { margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
+    .opt-section { margin-bottom: 12px; }
+    .opt-title { font-size: 12px; font-weight: 700; margin-bottom: 6px; color: var(--text); }
+    .opt-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .chk-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    .chk-item input { margin: 0; cursor: pointer; }
+
     .toast {
       position: fixed;
       top: 68px;
@@ -360,6 +418,38 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
 </head>
 <body>
   <div id="toast" class="toast"></div>
+
+  <div id="pdfOptModal" class="modal-backdrop">
+    <div class="modal-box">
+      <h3>📄 PDF Report Options</h3>
+      <p>रिपोर्ट में क्या-क्या देखना है चुनें (कम पेज के लिए Day-wise Summary और बिना Patient Name रखें):</p>
+
+      <div class="opt-section">
+        <div class="opt-title">Report Mode</div>
+        <select id="pdfModeSelect">
+          <option value="daywise">Day-wise Summary (हर दिन की 1 लाइन — कम पेज)</option>
+          <option value="detail">Token-wise Detail (हर मरीज़/टोकन की अलग लाइन)</option>
+        </select>
+      </div>
+
+      <div class="opt-section">
+        <div class="opt-title">Columns / Fields</div>
+        <div class="opt-grid">
+          <label class="chk-item"><input id="optPatientName" type="checkbox" /> Patient Name</label>
+          <label class="chk-item"><input id="optDoctor" type="checkbox" checked /> Doctor</label>
+          <label class="chk-item"><input id="optFee" type="checkbox" checked /> Fee</label>
+          <label class="chk-item"><input id="optOnline" type="checkbox" checked /> Online</label>
+          <label class="chk-item"><input id="optCash" type="checkbox" checked /> Cash</label>
+          <label class="chk-item"><input id="optDues" type="checkbox" checked /> Dues</label>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+        <button class="btn btn-ghost" onclick="closePdfModal()">रद्द करें</button>
+        <button class="btn btn-pdf" onclick="generateConfiguredPdf()">🖨️ PDF बनाएं</button>
+      </div>
+    </div>
+  </div>
 
   <div id="lockScreen" class="lock-wrap">
     <div class="lock-card">
@@ -383,12 +473,23 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     </div>
 
     <div class="container">
-      <div class="filters">
-        <input id="dateFilter" type="date" onchange="renderView()" />
-        <select id="doctorFilter" onchange="renderView()">
-          <option value="ALL">सभी डॉक्टर / All Doctors</option>
-        </select>
+      <div class="filter-box">
+        <div class="f-group">
+          <label>From Date (से)</label>
+          <input id="fromDateFilter" type="date" onchange="renderView()" />
+        </div>
+        <div class="f-group">
+          <label>To Date (तक)</label>
+          <input id="toDateFilter" type="date" onchange="renderView()" />
+        </div>
+        <div class="f-group" style="grid-column: span 2;">
+          <label>Doctor (डॉक्टर)</label>
+          <select id="doctorFilter" onchange="renderView()">
+            <option value="ALL">सभी डॉक्टर / All Doctors</option>
+          </select>
+        </div>
         <button class="btn btn-ghost" onclick="clearDateFilter()">सब तारीख</button>
+        <button class="btn btn-pdf" onclick="openPdfModal()">📄 PDF Report</button>
       </div>
 
       <div class="banner">
@@ -471,6 +572,35 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       return { online: paid, cash: 0 };
     }
 
+    function getFilteredBookings() {
+      let fromVal = toYmd(document.getElementById("fromDateFilter").value);
+      let toVal = toYmd(document.getElementById("toDateFilter").value);
+      const docVal = document.getElementById("doctorFilter").value;
+
+      if (fromVal && toVal && fromVal > toVal) {
+        const tmp = fromVal;
+        fromVal = toVal;
+        toVal = tmp;
+      }
+
+      const list = state.bookings
+        .filter((b) => {
+          const vDate = toYmd(b.Visit_Date);
+          const matchFrom = !fromVal || (vDate && vDate >= fromVal);
+          const matchTo = !toVal || (vDate && vDate <= toVal);
+          const matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
+          return matchFrom && matchTo && matchDoc;
+        })
+        .sort((a, b) => {
+          const da = toYmd(a.Visit_Date);
+          const db = toYmd(b.Visit_Date);
+          if (da !== db) return da < db ? -1 : 1;
+          return String(a.Token_ID || "").localeCompare(String(b.Token_ID || ""));
+        });
+
+      return { list, fromVal, toVal, docVal };
+    }
+
     function showToast(msg) {
       const el = document.getElementById("toast");
       el.textContent = msg;
@@ -480,8 +610,22 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     }
 
     function clearDateFilter() {
-      document.getElementById("dateFilter").value = "";
+      document.getElementById("fromDateFilter").value = "";
+      document.getElementById("toDateFilter").value = "";
       renderView();
+    }
+
+    function openPdfModal() {
+      const { list } = getFilteredBookings();
+      if (!list.length) {
+        showToast("इस Date Range में कोई डेटा नहीं है");
+        return;
+      }
+      document.getElementById("pdfOptModal").style.display = "flex";
+    }
+
+    function closePdfModal() {
+      document.getElementById("pdfOptModal").style.display = "none";
     }
 
     function buildQuery() {
@@ -508,7 +652,8 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       PIN = pin;
       document.getElementById("lockScreen").style.display = "none";
       document.getElementById("appShell").style.display = "block";
-      document.getElementById("dateFilter").value = "";
+      document.getElementById("fromDateFilter").value = "";
+      document.getElementById("toDateFilter").value = "";
       await loadAllData();
     }
 
@@ -658,15 +803,220 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       showToast(\`🩺 \${doc.name} (\${dayKey}) → \${nextAvail}\`);
     }
 
-    function renderView() {
-      const dateVal = toYmd(document.getElementById("dateFilter").value);
-      const docVal = document.getElementById("doctorFilter").value;
+    function escapeHtml(str) {
+      return String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
 
-      const list = state.bookings.filter((b) => {
-        const matchDate = !dateVal || toYmd(b.Visit_Date) === dateVal;
-        const matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
-        return matchDate && matchDoc;
+    function generateConfiguredPdf() {
+      const { list, fromVal, toVal, docVal } = getFilteredBookings();
+      if (!list.length) {
+        showToast("इस Date Range में कोई डेटा नहीं है");
+        closePdfModal();
+        return;
+      }
+
+      const mode = document.getElementById("pdfModeSelect").value;
+      const showPatientName = document.getElementById("optPatientName").checked;
+      const showDoctor = document.getElementById("optDoctor").checked;
+      const showFee = document.getElementById("optFee").checked;
+      const showOnline = document.getElementById("optOnline").checked;
+      const showCash = document.getElementById("optCash").checked;
+      const showDues = document.getElementById("optDues").checked;
+
+      closePdfModal();
+
+      let sumTotal = 0;
+      let sumOnline = 0;
+      let sumCash = 0;
+      let sumDues = 0;
+
+      const dayMap = new Map();
+      list.forEach((b) => {
+        const vDate = toYmd(b.Visit_Date) || "—";
+        const fee = Math.max(0, Number(b.OPD_Fee || 0));
+        const paid = Math.max(0, Number(b.Paid_Amount || 0));
+        const dues = Math.max(0, fee - paid);
+        const { online, cash } = splitPaidByChannel(b);
+
+        sumTotal += fee;
+        sumOnline += online;
+        sumCash += cash;
+        sumDues += dues;
+
+        if (!dayMap.has(vDate)) {
+          dayMap.set(vDate, {
+            date: vDate,
+            count: 0,
+            doctors: new Set(),
+            fee: 0,
+            online: 0,
+            cash: 0,
+            dues: 0,
+          });
+        }
+        const dRec = dayMap.get(vDate);
+        dRec.count += 1;
+        if (b.Doctor_Name) dRec.doctors.add(String(b.Doctor_Name).trim());
+        dRec.fee += fee;
+        dRec.online += online;
+        dRec.cash += cash;
+        dRec.dues += dues;
       });
+
+      const cols = [];
+      cols.push({ key: "date", label: "Date", align: "left" });
+      if (mode === "daywise") {
+        cols.push({ key: "patients", label: "Patients", align: "center" });
+      } else {
+        cols.push({ key: "token", label: "Token", align: "left" });
+        if (showPatientName) {
+          cols.push({ key: "patient", label: "Patient Name", align: "left" });
+        }
+      }
+      if (showDoctor) cols.push({ key: "doctor", label: "Doctor", align: "left" });
+      if (showFee) cols.push({ key: "fee", label: "Fee", align: "right" });
+      if (showOnline) cols.push({ key: "online", label: "Online", align: "right" });
+      if (showCash) cols.push({ key: "cash", label: "Cash", align: "right" });
+      if (showDues) cols.push({ key: "dues", label: "Dues", align: "right" });
+
+      const headHtml = cols
+        .map((c) => \`<th style="text-align:\${c.align};">\${c.label}</th>\`)
+        .join("");
+
+      let bodyRowsHtml = "";
+      if (mode === "daywise") {
+        bodyRowsHtml = [...dayMap.values()]
+          .map((dRec) => {
+            const cells = cols.map((c) => {
+              if (c.key === "date") return \`<td style="text-align:left;"><b>\${escapeHtml(dRec.date)}</b></td>\`;
+              if (c.key === "patients") return \`<td style="text-align:center;">\${dRec.count}</td>\`;
+              if (c.key === "doctor") return \`<td style="text-align:left;">\${escapeHtml([...dRec.doctors].join(", ") || "—")}</td>\`;
+              if (c.key === "fee") return \`<td style="text-align:right;">₹\${dRec.fee}</td>\`;
+              if (c.key === "online") return \`<td style="text-align:right;">₹\${dRec.online}</td>\`;
+              if (c.key === "cash") return \`<td style="text-align:right;">₹\${dRec.cash}</td>\`;
+              if (c.key === "dues") return \`<td style="text-align:right;color:\${dRec.dues > 0 ? '#b91c1c' : '#15803d'};"><b>₹\${dRec.dues}</b></td>\`;
+              return "<td>—</td>";
+            });
+            return \`<tr>\${cells.join("")}</tr>\`;
+          })
+          .join("");
+      } else {
+        bodyRowsHtml = list
+          .map((b) => {
+            const fee = Math.max(0, Number(b.OPD_Fee || 0));
+            const paid = Math.max(0, Number(b.Paid_Amount || 0));
+            const dues = Math.max(0, fee - paid);
+            const { online, cash } = splitPaidByChannel(b);
+            const patientLabel = \`\${b.Patient_Name || ""}\${b.Patient_Age ? \` (\${b.Patient_Age}y)\` : ""}\`;
+
+            const cells = cols.map((c) => {
+              if (c.key === "date") return \`<td style="text-align:left;">\${escapeHtml(toYmd(b.Visit_Date))}</td>\`;
+              if (c.key === "token") return \`<td style="text-align:left;"><b>\${escapeHtml(b.Token_ID)}</b></td>\`;
+              if (c.key === "patient") return \`<td style="text-align:left;">\${escapeHtml(patientLabel)}</td>\`;
+              if (c.key === "doctor") return \`<td style="text-align:left;">\${escapeHtml(b.Doctor_Name)}</td>\`;
+              if (c.key === "fee") return \`<td style="text-align:right;">₹\${fee}</td>\`;
+              if (c.key === "online") return \`<td style="text-align:right;">₹\${online}</td>\`;
+              if (c.key === "cash") return \`<td style="text-align:right;">₹\${cash}</td>\`;
+              if (c.key === "dues") return \`<td style="text-align:right;color:\${dues > 0 ? '#b91c1c' : '#15803d'};"><b>₹\${dues}</b></td>\`;
+              return "<td>—</td>";
+            });
+            return \`<tr>\${cells.join("")}</tr>\`;
+          })
+          .join("");
+      }
+
+      const footCells = cols.map((c, idx) => {
+        if (idx === 0) return \`<td style="text-align:left;">TOTAL</td>\`;
+        if (mode === "daywise" && c.key === "patients") {
+          return \`<td style="text-align:center;">\${list.length}</td>\`;
+        }
+        if (c.key === "fee") return \`<td style="text-align:right;">₹\${sumTotal}</td>\`;
+        if (c.key === "online") return \`<td style="text-align:right;">₹\${sumOnline}</td>\`;
+        if (c.key === "cash") return \`<td style="text-align:right;">₹\${sumCash}</td>\`;
+        if (c.key === "dues") return \`<td style="text-align:right;">₹\${sumDues}</td>\`;
+        return "<td></td>";
+      });
+
+      const rangeLabel =
+        fromVal || toVal
+          ? \`\${fromVal || "शुरू"} से \${toVal || "आज तक"}\`
+          : "सभी तारीख (All Dates)";
+      const clinicName = escapeHtml(state.clinic?.name || BUSINESS_ID || "OPD Clinic");
+      const doctorLabel = docVal === "ALL" ? "सभी डॉक्टर (All Doctors)" : escapeHtml(docVal);
+
+      const printWin = window.open("", "_blank");
+      if (!printWin) {
+        showToast("Pop-up blocked — ब्राउज़र में Pop-up Allow करें");
+        return;
+      }
+
+      printWin.document.write(\`<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <title>\${clinicName} — OPD Report (\${rangeLabel})</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; color: #111827; }
+    .hdr { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0f62fe; padding-bottom: 10px; margin-bottom: 12px; }
+    .hdr h1 { margin: 0 0 4px; font-size: 18px; color: #0f172a; }
+    .hdr p { margin: 2px 0; font-size: 12px; color: #475569; }
+    .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 12px; }
+    .card { border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 8px; background: #f8fafc; }
+    .card span { display: block; font-size: 10px; color: #475569; text-transform: uppercase; font-weight: 700; }
+    .card b { font-size: 14px; color: #0f172a; }
+    table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+    th, td { border: 1px solid #cbd5e1; padding: 5px 7px; }
+    th { background: #0f62fe; color: #fff; font-weight: 700; }
+    tr:nth-child(even) { background: #f8fafc; }
+    tfoot td { background: #e2e8f0; font-weight: 800; }
+    @media print {
+      .no-print { display: none; }
+      body { margin: 6mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print" style="margin-bottom:10px;text-align:right;">
+    <button onclick="window.print()" style="background:#0f62fe;color:#fff;border:none;padding:8px 14px;border-radius:8px;font-weight:700;cursor:pointer;">🖨️ Print / Save as PDF</button>
+  </div>
+  <div class="hdr">
+    <div>
+      <h1>\${clinicName} — \${mode === "daywise" ? "Day-wise Summary Report" : "Token-wise OPD Report"}</h1>
+      <p><b>Date Range:</b> \${rangeLabel} | <b>Doctor:</b> \${doctorLabel}</p>
+    </div>
+    <div style="text-align:right;">
+      <p><b>Generated:</b> \${TODAY_IST}</p>
+      <p><b>ID:</b> \${escapeHtml(BUSINESS_ID || state.clinic?.id || "")}</p>
+    </div>
+  </div>
+
+  <div class="cards">
+    <div class="card"><span>Total Patients</span><b>\${list.length}</b></div>
+    <div class="card"><span>Total Amount</span><b>₹\${sumTotal}</b></div>
+    <div class="card"><span>Online</span><b>₹\${sumOnline}</b></div>
+    <div class="card"><span>Cash</span><b>₹\${sumCash}</b></div>
+    <div class="card"><span>Dues</span><b style="color:#b91c1c;">₹\${sumDues}</b></div>
+  </div>
+
+  <table>
+    <thead><tr>\${headHtml}</tr></thead>
+    <tbody>\${bodyRowsHtml}</tbody>
+    <tfoot><tr>\${footCells.join("")}</tr></tfoot>
+  </table>
+  <script>
+    window.onload = function() { setTimeout(function() { window.print(); }, 300); };
+  </script>
+</body>
+</html>\`);
+      printWin.document.close();
+    }
+
+    function renderView() {
+      const { list, docVal } = getFilteredBookings();
 
       const running = list.find(
         (b) => String(b.Queue_Status || "").trim().toLowerCase() === "in consultation"
@@ -724,7 +1074,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
       }
 
       if (!list.length) {
-        html += \`<div class="q-card" style="text-align:center;color:#525252;">इस तारीख/डॉक्टर के लिए कोई बुकिंग नहीं मिली।</div>\`;
+        html += \`<div class="q-card" style="text-align:center;color:#525252;">इस Date Range / डॉक्टर के लिए कोई बुकिंग नहीं मिली।</div>\`;
       } else {
         list.forEach((b) => {
           const st = String(b.Queue_Status || "Waiting").trim();
@@ -741,9 +1091,7 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
           const balanceAmt = Math.max(0, opdFee - paidAmt);
           const { online, cash } = splitPaidByChannel(b);
 
-          const metaLine = APP_ROLE === "reception"
-            ? \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
-            : \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`;
+          const metaLine = \`👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${visitYmd} | ⏰ \${b.Batch_Slot || ""}<br>📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}<br>💰 Total: <b>₹\${opdFee}</b> | Online: <b>₹\${online}</b> | Cash: <b>₹\${cash}</b> | Dues: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`;
 
           const disAttr = lockedPast ? "disabled" : "";
           const cashBtnHtml = APP_ROLE === "reception"
