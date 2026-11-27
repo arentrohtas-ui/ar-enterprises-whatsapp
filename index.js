@@ -14,6 +14,7 @@ const VERIFY_TOKEN = String(
   process.env.VERIFY_TOKEN || "ar_opd_verify_token"
 ).trim();
 const CRON_SECRET = String(process.env.CRON_SECRET || "").trim();
+const STAFF_APP_PIN = String(process.env.STAFF_APP_PIN || "1234").trim();
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const TOKEN_PREFIX = "OPD_";
 const TOKEN_START_NUMBER = 101;
@@ -187,6 +188,37 @@ async function sendWhatsAppText(business, toPhone, body) {
   return r.json();
 }
 
+async function sendTwoAheadAlertIfNeeded(business, sheetId, alert2Ahead) {
+  if (!alert2Ahead) return null;
+  const targetTokenId = String(alert2Ahead.Token_ID || "").trim();
+  const patientName = String(alert2Ahead.Patient_Name || "Patient").trim();
+  const patientPhone = String(alert2Ahead.Patient_Phone || "").trim();
+  const doctorName = String(alert2Ahead.Doctor_Name || "Doctor").trim();
+  const batchSlot = String(alert2Ahead.Batch_Slot || "").trim();
+
+  if (!targetTokenId || !patientPhone) return null;
+
+  const alertText =
+    `🔔 *${business.name || "City Care OPD"} — 2 नंबर पहले अलर्ट*\n\n` +
+    `नमस्ते *${patientName}*,\n` +
+    `आपका टोकन *${targetTokenId}* आने में अब *केवल 2 नंबर बाकी* हैं।\n` +
+    `• डॉक्टर: *${doctorName}*\n` +
+    `• बैच: *${batchSlot}*\n\n` +
+    `कृपया तैयार रहें और समय से कतार के पास पहुँचें।`;
+
+  const waRes = await sendWhatsAppText(business, patientPhone, alertText);
+  if (waRes && !waRes.error) {
+    await callGas("POST", {
+      action: "mark_two_ahead_sent",
+      spreadsheetId: sheetId,
+      spreadsheet_id: sheetId,
+      tokenId: targetTokenId,
+    });
+    return targetTokenId;
+  }
+  return null;
+}
+
 function extractNextOpdTokenFromRows(existingRows = []) {
   let maxNum = TOKEN_START_NUMBER - 1;
   for (const r of existingRows) {
@@ -210,10 +242,10 @@ async function getNextOpdTokenForSheet(sheetId) {
       tokenId: "",
       phone: "",
     });
-    const rows = Array.isArray(res?.bookings)
-      ? res.bookings
-      : Array.isArray(res?.allBookings)
+    const rows = Array.isArray(res?.allBookings)
       ? res.allBookings
+      : Array.isArray(res?.bookings)
+      ? res.bookings
       : Array.isArray(res?.data)
       ? res.data
       : [];
@@ -306,6 +338,7 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   const doc = pending.selectedDoctor || {};
   const opdFee = Number(doc.opdFee ?? pending.opdFee ?? 0);
   const payableAmount = Number(pending.payableAmount ?? opdFee);
+  const balanceAmount = Math.max(0, opdFee - payableAmount);
   const lang = pending.lang === "en" ? "en" : "hi";
   const dayLabel = pending.dayInfo?.shortLabel || "";
   const visitDate = String(pending.visitDate || "").slice(0, 10);
@@ -350,8 +383,17 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
         `• Date: *${dayText}*\n` +
         `• Doctor: *${doc.name}*\n` +
         `• Time Slot: *${pending.batchSlot}*\n` +
-        `• Paid Amount: *₹${payableAmount}*\n` +
-        `• Status: *Paid*`
+        `• Paid Online: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• Balance at Counter (Cash): *₹${balanceAmount}*\n`
+          : ``) +
+        `• Status: *Paid*\n\n` +
+        `📌 *Important Instructions:*\n` +
+        `• Please arrive on time for your slot (*${pending.batchSlot}*).\n` +
+        `• Please carry your *old prescription / previous slip & reports* (if any) with you.` +
+        (balanceAmount > 0
+          ? `\n• Pay remaining *₹${balanceAmount}* in *cash at the clinic counter*.`
+          : ``)
       : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n` +
         `• टोकन नंबर: *${tokenId}*\n` +
         `• मरीज़: *${pending.patientName}* (${pending.patientAge} वर्ष)\n` +
@@ -359,8 +401,17 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
         `• तारीख: *${dayText}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
         `• समय स्लॉट: *${pending.batchSlot}*\n` +
-        `• भुगतान राशि: *₹${payableAmount}*\n` +
-        `• स्टेटस: *Paid*`;
+        `• ऑनलाइन भुगतान: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n` +
+        (balanceAmount > 0
+          ? `• काउंटर पर शेष राशि (नकद): *₹${balanceAmount}*\n`
+          : ``) +
+        `• स्टेटस: *Paid*\n\n` +
+        `📌 *ज़रूरी निर्देश:*\n` +
+        `• कृपया अपने निर्धारित समय (*${pending.batchSlot}*) पर सही समय से क्लिनिक पहुँचें।\n` +
+        `• कृपया अपनी *पुरानी पर्चा / पिछली पर्ची व पुरानी रिपोर्ट* (यदि हो तो) अवश्य साथ रखें।` +
+        (balanceAmount > 0
+          ? `\n• शेष राशि *₹${balanceAmount}* *क्लिनिक काउंटर पर नकद (Cash)* जमा करें।`
+          : ``);
 
   const waTarget = pending.patientPhone || pending.from;
   await sendWhatsAppText(business, waTarget, confirmMsg);
@@ -439,6 +490,55 @@ async function verifyCashfreeOrderDirect({
   }
 
   return { status: "PENDING" };
+}
+
+async function runScheduledReminders(visitDateInput = "") {
+  const visitDate = String(visitDateInput || "").slice(0, 10) || getTodayIstYmd();
+  const clients = await getActiveClients();
+  let totalSent = 0;
+
+  for (const client of clients) {
+    if (!client.sheetId) continue;
+    const dueRes = await callGas("GET", {
+      action: "get_due_reminders",
+      spreadsheet_id: client.sheetId,
+      visitDate,
+    });
+    const dueList = Array.isArray(dueRes?.reminders) ? dueRes.reminders : [];
+
+    for (const row of dueList) {
+      const tokenId = String(row.Token_ID || "").trim();
+      const patientName = String(row.Patient_Name || "Patient").trim();
+      const patientPhone = String(row.Patient_Phone || "").trim();
+      const doctorName = String(row.Doctor_Name || "Doctor").trim();
+      const batchSlot = String(row.Batch_Slot || "").trim();
+      const vDate = String(row.Visit_Date || visitDate).slice(0, 10);
+
+      if (!tokenId || !patientPhone) continue;
+
+      const msg =
+        `⏰ *${client.name || "City Care OPD"} — OPD रिमाइंडर*\n\n` +
+        `नमस्ते *${patientName}*,\n` +
+        `आपका टोकन *${tokenId}* (${vDate}) के लिए दर्ज है।\n` +
+        `• डॉक्टर: *${doctorName}*\n` +
+        `• बैच: *${batchSlot}*\n\n` +
+        `कृपया समय से क्लिनिक पहुँचें।`;
+
+      const waRes = await sendWhatsAppText(client, patientPhone, msg);
+      if (waRes && !waRes.error) {
+        await callGas("POST", {
+          action: "mark_reminder_sent",
+          spreadsheetId: client.sheetId,
+          spreadsheet_id: client.sheetId,
+          tokenId,
+          reminderSent: "Yes",
+        });
+        totalSent += 1;
+      }
+    }
+  }
+
+  return { ok: true, visitDate, totalSent };
 }
 
 function buildCtx(business, from) {
@@ -529,81 +629,668 @@ function buildCtx(business, from) {
   };
 }
 
-async function runScheduledReminders(visitDate = "") {
-  const targetDate = String(visitDate || "").trim() || getTodayIstYmd();
-  const clients = await getActiveClients();
-  const summary = [];
-
-  for (const client of clients) {
-    if (!client.sheetId) continue;
-
-    const dueRes = await callGas("GET", {
-      action: "get_due_reminders",
-      spreadsheet_id: client.sheetId,
-      visitDate: targetDate,
-    });
-
-    const dueList = Array.isArray(dueRes?.reminders) ? dueRes.reminders : [];
-    let sentCount = 0;
-
-    for (const item of dueList) {
-      const tokenId = String(item.Token_ID || "").trim();
-      const patientName = String(item.Patient_Name || "Patient").trim();
-      const patientPhone = String(item.Patient_Phone || "").trim();
-      const doctorName = String(item.Doctor_Name || "Doctor").trim();
-      const batchSlot = String(item.Batch_Slot || "").trim();
-      const dateStr = String(item.Visit_Date || targetDate).slice(0, 10);
-
-      if (!tokenId || !patientPhone) continue;
-
-      const reminderText =
-        `⏰ *OPD Appointment Reminder — ${client.name}*\n\n` +
-        `नमस्ते *${patientName}*,\n` +
-        `आपका OPD टोकन *${tokenId}* आज (*${dateStr}*) के लिए शेड्यूल है।\n` +
-        `• डॉक्टर: *${doctorName}*\n` +
-        `• समय बैच: *${batchSlot}*\n\n` +
-        `कृपया समय से पहले क्लिनिक पहुँचें।`;
-
-      const waRes = await sendWhatsAppText(client, patientPhone, reminderText);
-      if (waRes && !waRes.error) {
-        await callGas("POST", {
-          action: "mark_reminder_sent",
-          spreadsheetId: client.sheetId,
-          tokenId,
-          reminderSent: "Yes",
-        });
-        sentCount += 1;
-      }
-    }
-
-    summary.push({
-      clinic: client.name,
-      sheetId: client.sheetId,
-      dueFound: dueList.length,
-      sent: sentCount,
-    });
-  }
-
-  return { ok: true, visitDate: targetDate, summary };
+function isValidStaffPin(req) {
+  const pin = String(
+    req.headers["x-staff-pin"] || req.query.pin || req.body?.pin || ""
+  ).trim();
+  return pin && pin === STAFF_APP_PIN;
 }
 
 app.get("/", (req, res) => {
-  res.status(200).json({ ok: true, service: "AR Enterprises OPD Engine" });
+  res.status(200).send("AR Enterprises OPD Engine is running.");
 });
 
-app.all("/send-reminders", async (req, res) => {
+app.post("/api/app/login", (req, res) => {
+  const pin = String(req.body?.pin || "").trim();
+  if (pin !== STAFF_APP_PIN) {
+    return res.status(401).json({ ok: false, error: "गलत PIN / Invalid PIN" });
+  }
+  return res.status(200).json({ ok: true, today: getTodayIstYmd() });
+});
+
+app.get("/api/app/data", async (req, res) => {
+  try {
+    if (!isValidStaffPin(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+    }
+    const clients = await getActiveClients();
+    const requestedSheetId = String(
+      req.query.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
+    ).trim();
+    const activeClient =
+      clients.find((c) => c.sheetId === requestedSheetId) ||
+      clients[0] || {
+        name: "OPD Clinic",
+        sheetId: process.env.DEFAULT_CLINIC_SHEET_ID || "",
+      };
+
+    if (!activeClient.sheetId) {
+      return res.status(200).json({
+        ok: true,
+        today: getTodayIstYmd(),
+        clients: clients.map((c) => ({
+          id: c.id,
+          name: c.name,
+          sheetId: c.sheetId,
+        })),
+        clinic: activeClient,
+        doctors: [],
+        bookings: [],
+      });
+    }
+
+    const dataRes = await callGas("GET", {
+      action: "get_dashboard_data",
+      spreadsheet_id: activeClient.sheetId,
+      spreadsheetId: activeClient.sheetId,
+    });
+
+    const rawBookings = Array.isArray(dataRes?.bookings) ? dataRes.bookings : [];
+    const normalizedBookings = rawBookings.map((b) => ({
+      ...b,
+      Visit_Date: String(b.Visit_Date || b.visitDate || "").slice(0, 10),
+    }));
+
+    return res.status(200).json({
+      ok: true,
+      today: getTodayIstYmd(),
+      clients: clients.map((c) => ({
+        id: c.id,
+        name: c.name,
+        sheetId: c.sheetId,
+      })),
+      clinic: {
+        id: activeClient.id,
+        name: activeClient.name,
+        sheetId: activeClient.sheetId,
+      },
+      doctors: Array.isArray(dataRes?.doctors) ? dataRes.doctors : [],
+      bookings: normalizedBookings,
+    });
+  } catch (err) {
+    console.error("App Data Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/app/queue-status", async (req, res) => {
+  try {
+    if (!isValidStaffPin(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+    }
+
+    const { sheetId, tokenId, queueStatus } = req.body || {};
+    if (!sheetId || !tokenId || !queueStatus) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "sheetId, tokenId, queueStatus required" });
+    }
+
+    const gasRes = await callGas("POST", {
+      action: "update_queue_status",
+      spreadsheetId: sheetId,
+      spreadsheet_id: sheetId,
+      tokenId: String(tokenId).trim(),
+      queueStatus: String(queueStatus).trim(),
+    });
+
+    let notifiedToken = null;
+    if (
+      String(queueStatus).trim().toLowerCase() === "in consultation" &&
+      gasRes?.alert2Ahead
+    ) {
+      const business = await resolveBusiness("", sheetId);
+      notifiedToken = await sendTwoAheadAlertIfNeeded(
+        business,
+        sheetId,
+        gasRes.alert2Ahead
+      );
+    }
+
+    return res.status(200).json({
+      ok: true,
+      notified2AheadToken: notifiedToken,
+      bookings: Array.isArray(gasRes?.bookings) ? gasRes.bookings : [],
+    });
+  } catch (err) {
+    console.error("Queue Status Update Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/app/doctor-avail", async (req, res) => {
+  try {
+    if (!isValidStaffPin(req)) {
+      return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
+    }
+
+    const { sheetId, doctorId, doctorName, dayKey, avail } = req.body || {};
+    if (!sheetId || !dayKey || !avail) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "sheetId, dayKey, avail required" });
+    }
+
+    const gasRes = await callGas("POST", {
+      action: "update_doctor_avail",
+      spreadsheetId: sheetId,
+      spreadsheet_id: sheetId,
+      doctorId,
+      doctorName,
+      dayKey,
+      avail,
+    });
+
+    return res.status(200).json({ ok: true, result: gasRes });
+  } catch (err) {
+    console.error("Doctor Avail Update Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+function renderStandaloneAppHtml(appRole) {
+  const isDoctor = appRole === "doctor";
+  const pageTitle = isDoctor ? "Doctor App" : "Reception App";
+  const headerIcon = isDoctor ? "🩺" : "💻";
+  const subtitleText = isDoctor
+    ? "Doctor App — मरीज़ कतार व उपलब्धता"
+    : "Reception App — कतार, दिया गया शुल्क व बाक़ी राशि";
+
+  return `<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>${pageTitle}</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --primary: ${isDoctor ? "#0d9488" : "#0f62fe"};
+      --primary-dark: ${isDoctor ? "#0f766e" : "#0043ce"};
+      --text: #161616;
+      --muted: #525252;
+      --border: #e0e6ed;
+      --wait: #fff4e5;
+      --wait-t: #9a5200;
+      --live: #e6f4ea;
+      --live-t: #137333;
+      --done: #eef2ff;
+      --done-t: #3730a3;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding-bottom: 32px;
+    }
+    .lock-wrap {
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .lock-card {
+      width: 100%;
+      max-width: 360px;
+      background: var(--card);
+      border-radius: 20px;
+      padding: 28px 22px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      text-align: center;
+    }
+    .lock-card h2 { margin: 0 0 8px; font-size: 21px; }
+    .lock-card p { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+    .pin-input {
+      width: 100%;
+      font-size: 24px;
+      letter-spacing: 10px;
+      text-align: center;
+      padding: 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 14px;
+      font-weight: 700;
+    }
+    .btn {
+      border: none;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .btn-primary { background: var(--primary); color: #fff; width: 100%; }
+    .btn-primary:active { background: var(--primary-dark); }
+    .btn-live { background: #137333; color: #fff; flex: 1; }
+    .btn-done { background: #3730a3; color: #fff; flex: 1; }
+    .btn-wait { background: #b45309; color: #fff; flex: 1; }
+    .btn-ghost { background: #eef2f7; color: var(--text); }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .topbar-title { font-size: 17px; font-weight: 700; margin: 0; }
+    .topbar-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    .container { max-width: 720px; margin: 0 auto; padding: 14px; }
+    .filters {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    select, input[type="date"] {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      font-size: 14px;
+      color: var(--text);
+    }
+    .banner {
+      background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+      color: #fff;
+      border-radius: 16px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .banner-big { font-size: 20px; font-weight: 800; }
+    .banner-small { font-size: 11px; opacity: 0.9; text-transform: uppercase; }
+
+    .q-card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
+    }
+    .q-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .token-pill {
+      font-weight: 800;
+      font-size: 15px;
+      color: var(--primary);
+    }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .b-waiting { background: var(--wait); color: var(--wait-t); }
+    .b-in-consultation { background: var(--live); color: var(--live-t); }
+    .b-completed { background: var(--done); color: var(--done-t); }
+    .q-meta { font-size: 13px; color: var(--muted); margin: 4px 0 10px; line-height: 1.55; }
+    .q-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .avail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-top: 1px dashed var(--border);
+      font-size: 13px;
+    }
+    .chip {
+      padding: 6px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .chip-p { background: #e6f4ea; color: #137333; border-color: #b7e1cd; }
+    .chip-a { background: #fce8e6; color: #c5221f; border-color: #fad2cf; }
+
+    .toast {
+      position: fixed;
+      top: 68px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #161616;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 12px;
+      font-size: 13px;
+      z-index: 50;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+
+  <div id="lockScreen" class="lock-wrap">
+    <div class="lock-card">
+      <h2>🔐 ${headerIcon} ${pageTitle}</h2>
+      <p>${pageTitle} खोलने के लिए PIN डालें</p>
+      <input id="pinInput" class="pin-input" type="password" inputmode="numeric" maxlength="8" placeholder="••••" />
+      <button class="btn btn-primary" onclick="unlockApp()">Unlock ${pageTitle}</button>
+    </div>
+  </div>
+
+  <div id="appShell" style="display:none;">
+    <div class="topbar">
+      <div>
+        <div id="clinicTitle" class="topbar-title">${headerIcon} ${pageTitle}</div>
+        <div class="topbar-sub">${subtitleText}</div>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn btn-ghost" onclick="loadAllData()">🔄</button>
+        <button class="btn btn-ghost" onclick="lockApp()">🔒</button>
+      </div>
+    </div>
+
+    <div class="container">
+      <div class="filters">
+        <input id="dateFilter" type="date" onchange="renderView()" />
+        <select id="doctorFilter" onchange="renderView()">
+          <option value="ALL">सभी डॉक्टर / All Doctors</option>
+        </select>
+      </div>
+
+      <div class="banner">
+        <div>
+          <div class="banner-small">CURRENT RUNNING TOKEN</div>
+          <div id="currentTokenText" class="banner-big">—</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="banner-small">WAITING PATIENTS</div>
+          <div id="waitingCountText" class="banner-big">0</div>
+        </div>
+        ${
+          !isDoctor
+            ? `<div style="width:100%;border-top:1px solid rgba(255,255,255,0.22);padding-top:10px;display:flex;justify-content:space-between;gap:12px;">
+                <div>
+                  <div class="banner-small">कुल दिया गया (PAID)</div>
+                  <div id="totalPaidText" class="banner-big">₹0</div>
+                </div>
+                <div style="text-align:right;">
+                  <div class="banner-small">कुल बाक़ी (BALANCE)</div>
+                  <div id="totalBalanceText" class="banner-big">₹0</div>
+                </div>
+              </div>`
+            : ``
+        }
+      </div>
+
+      <div id="mainContent"></div>
+    </div>
+  </div>
+
+  <script>
+    const APP_ROLE = "${appRole}";
+    let PIN = "";
+    let state = { clinic: null, doctors: [], bookings: [] };
+
+    function showToast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.style.display = "block";
+      clearTimeout(window._t);
+      window._t = setTimeout(() => { el.style.display = "none"; }, 3000);
+    }
+
+    async function unlockApp() {
+      const pin = document.getElementById("pinInput").value.trim();
+      const r = await fetch("/api/app/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        showToast(d.error || "गलत PIN");
+        return;
+      }
+      PIN = pin;
+      document.getElementById("lockScreen").style.display = "none";
+      document.getElementById("appShell").style.display = "block";
+      document.getElementById("dateFilter").value = d.today || new Date().toISOString().slice(0, 10);
+      await loadAllData();
+    }
+
+    function lockApp() {
+      PIN = "";
+      document.getElementById("pinInput").value = "";
+      document.getElementById("appShell").style.display = "none";
+      document.getElementById("lockScreen").style.display = "flex";
+    }
+
+    async function loadAllData() {
+      if (!PIN) return;
+      const r = await fetch("/api/app/data", {
+        headers: { "x-staff-pin": PIN },
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        showToast(d.error || "Data load failed");
+        return;
+      }
+      state.clinic = d.clinic;
+      state.doctors = d.doctors || [];
+      state.bookings = d.bookings || [];
+      document.getElementById("clinicTitle").textContent =
+        \`${headerIcon} \${d.clinic?.name || "OPD"} — ${pageTitle}\`;
+
+      const sel = document.getElementById("doctorFilter");
+      const prevVal = sel.value || "ALL";
+      sel.innerHTML = '<option value="ALL">सभी डॉक्टर / All Doctors</option>';
+      state.doctors.forEach((doc) => {
+        const opt = document.createElement("option");
+        opt.value = doc.name;
+        opt.textContent = doc.name;
+        sel.appendChild(opt);
+      });
+      if ([...sel.options].some((o) => o.value === prevVal)) sel.value = prevVal;
+
+      renderView();
+    }
+
+    async function setQueueStatus(tokenId, queueStatus) {
+      const r = await fetch("/api/app/queue-status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
+        body: JSON.stringify({
+          sheetId: state.clinic?.sheetId,
+          tokenId,
+          queueStatus,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        showToast(d.error || "Update failed");
+        return;
+      }
+      state.bookings = d.bookings || state.bookings;
+      if (d.notified2AheadToken) {
+        showToast(\`✅ \${tokenId} → \${queueStatus} | 2 नंबर पहले अलर्ट भेजा गया: \${d.notified2AheadToken}\`);
+      } else {
+        showToast(\`✅ \${tokenId} → \${queueStatus}\`);
+      }
+      renderView();
+    }
+
+    async function toggleDoctorAvail(doc, dayKey) {
+      const curMap = { today: doc.todayAvail, next: doc.nextDayAvail, plus2: doc.plus2DayAvail };
+      const nextAvail = String(curMap[dayKey] || "P").toUpperCase() === "P" ? "A" : "P";
+      const r = await fetch("/api/app/doctor-avail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-staff-pin": PIN },
+        body: JSON.stringify({
+          sheetId: state.clinic?.sheetId,
+          doctorId: doc.id,
+          doctorName: doc.name,
+          dayKey,
+          avail: nextAvail,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        showToast("Availability update failed");
+        return;
+      }
+      await loadAllData();
+      showToast(\`🩺 \${doc.name} (\${dayKey}) → \${nextAvail}\`);
+    }
+
+    function renderView() {
+      const dateVal = document.getElementById("dateFilter").value;
+      const docVal = document.getElementById("doctorFilter").value;
+
+      const list = state.bookings.filter((b) => {
+        const matchDate = !dateVal || String(b.Visit_Date || "").slice(0, 10) === dateVal;
+        const matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
+        return matchDate && matchDoc;
+      });
+
+      const running = list.find(
+        (b) => String(b.Queue_Status || "").trim().toLowerCase() === "in consultation"
+      );
+      const waitingList = list.filter(
+        (b) => String(b.Queue_Status || "Waiting").trim().toLowerCase() === "waiting"
+      );
+
+      document.getElementById("currentTokenText").textContent =
+        running ? \`\${running.Token_ID} (\${running.Patient_Name})\` : "कोई नहीं / None";
+      document.getElementById("waitingCountText").textContent = String(waitingList.length);
+
+      if (APP_ROLE === "reception") {
+        let sumPaid = 0;
+        let sumBalance = 0;
+        list.forEach((b) => {
+          const fee = Number(b.OPD_Fee || 0);
+          const paid = Number(b.Paid_Amount || 0);
+          sumPaid += paid;
+          sumBalance += Math.max(0, fee - paid);
+        });
+        const paidEl = document.getElementById("totalPaidText");
+        const balEl = document.getElementById("totalBalanceText");
+        if (paidEl) paidEl.textContent = \`₹\${sumPaid}\`;
+        if (balEl) balEl.textContent = \`₹\${sumBalance}\`;
+      }
+
+      const container = document.getElementById("mainContent");
+      let html = "";
+
+      if (APP_ROLE === "doctor") {
+        const docsToShow = docVal === "ALL"
+          ? state.doctors
+          : state.doctors.filter((d) => d.name === docVal);
+
+        html += \`<div class="q-card"><b>🩺 Doctor Availability Toggle (P = Present, A = Off)</b>\`;
+        docsToShow.forEach((doc) => {
+          html += \`
+            <div class="avail-row">
+              <div><b>\${doc.name}</b><br><span style="color:#525252;font-size:12px;">\${doc.specialty}</span></div>
+              <div style="display:flex;gap:6px;">
+                <button class="chip \${doc.todayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "today")'>आज: \${doc.todayAvail || 'P'}</button>
+                <button class="chip \${doc.nextDayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "next")'>कल: \${doc.nextDayAvail || 'P'}</button>
+                <button class="chip \${doc.plus2DayAvail === 'P' ? 'chip-p' : 'chip-a'}" onclick='toggleDoctorAvail(\${JSON.stringify(doc)}, "plus2")'>परसों: \${doc.plus2DayAvail || 'P'}</button>
+              </div>
+            </div>
+          \`;
+        });
+        html += \`</div>\`;
+      }
+
+      if (!list.length) {
+        html += \`<div class="q-card" style="text-align:center;color:#525252;">इस तारीख/डॉक्टर के लिए कोई बुकिंग नहीं मिली।</div>\`;
+      } else {
+        list.forEach((b) => {
+          const st = String(b.Queue_Status || "Waiting").trim();
+          const cls = st.toLowerCase() === "in consultation"
+            ? "b-in-consultation"
+            : st.toLowerCase() === "completed"
+            ? "b-completed"
+            : "b-waiting";
+          const tId = String(b.Token_ID || "");
+          const opdFee = Number(b.OPD_Fee || 0);
+          const paidAmt = Number(b.Paid_Amount || 0);
+          const balanceAmt = Math.max(0, opdFee - paidAmt);
+
+          const feeLine = APP_ROLE === "reception"
+            ? \`<br>💰 Fee: <b>₹\${opdFee}</b> | दिया: <b>₹\${paidAmt}</b> | बाक़ी: <b style="color:\${balanceAmt > 0 ? '#c5221f' : '#137333'}">₹\${balanceAmt}</b>\`
+            : "";
+
+          html += \`
+            <div class="q-card">
+              <div class="q-top">
+                <span class="token-pill">\${tId} — \${b.Patient_Name || ""} (\${b.Patient_Age || ""}y)</span>
+                <span class="badge \${cls}">\${st}</span>
+              </div>
+              <div class="q-meta">
+                👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | ⏰ \${b.Batch_Slot || ""}<br>
+                📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}\${feeLine}
+              </div>
+              <div class="q-actions">
+                <button class="btn btn-live" onclick="setQueueStatus('\${tId}', 'In Consultation')">▶ In Consultation</button>
+                <button class="btn btn-done" onclick="setQueueStatus('\${tId}', 'Completed')">✔ Completed</button>
+                <button class="btn btn-wait" onclick="setQueueStatus('\${tId}', 'Waiting')">⏳ Waiting</button>
+              </div>
+            </div>
+          \`;
+        });
+      }
+
+      container.innerHTML = html;
+    }
+  </script>
+</body>
+</html>`;
+}
+
+app.get("/reception-app", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(renderStandaloneAppHtml("reception"));
+});
+
+app.get("/doctor-app", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(renderStandaloneAppHtml("doctor"));
+});
+
+app.get("/app", (req, res) => {
+  res.redirect("/reception-app");
+});
+
+app.post("/send-reminders", async (req, res) => {
   try {
     if (CRON_SECRET) {
-      const provided =
-        req.headers["x-cron-secret"] ||
-        req.query.secret ||
-        req.body?.secret ||
-        "";
-      if (String(provided).trim() !== CRON_SECRET) {
+      const auth = String(req.headers["x-cron-secret"] || req.query.secret || "").trim();
+      if (auth !== CRON_SECRET) {
         return res.status(401).json({ ok: false, error: "Unauthorized" });
       }
     }
-
     const visitDate = req.query.visitDate || req.body?.visitDate || "";
     const result = await runScheduledReminders(visitDate);
     return res.status(200).json(result);
@@ -645,7 +1332,9 @@ app.post("/webhook/cashfree", async (req, res) => {
       .filter(Boolean);
 
     const matchedOrderId =
-      candidateIds.find((id) => pendingPayments.has(id)) || candidateIds[0] || "";
+      candidateIds.find((id) => pendingPayments.has(id)) ||
+      candidateIds[0] ||
+      "";
 
     const paymentStatus = String(
       body.data?.payment?.payment_status ||
@@ -723,7 +1412,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 10000;
+const PORT = Number(process.env.PORT || 10000);
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`AR Enterprises OPD Engine running on ${PORT}`);
 });
