@@ -72,31 +72,17 @@ function findClientByBusinessId(clients = [], { businessId = "", sheetId = "" } 
         String(c.id || "").trim().toLowerCase() === cleanBizId ||
         String(c.opdId || "").trim().toLowerCase() === cleanBizId
     );
-    if (exactMatch) return exactMatch;
+    return exactMatch || null;
   }
 
   if (cleanSheetId) {
     const bySheet = clients.find(
       (c) => String(c.sheetId || "").trim() === cleanSheetId
     );
-    if (bySheet) return bySheet;
+    return bySheet || null;
   }
 
-  if (cleanBizId) {
-    return null;
-  }
-
-  return (
-    clients.find((c) => String(c.category || "opd").toLowerCase() === "opd") ||
-    clients[0] || {
-      id: "",
-      opdId: "",
-      name: "OPD Clinic",
-      sheetId: cleanSheetId || process.env.DEFAULT_CLINIC_SHEET_ID || "",
-      doctorPin: process.env.STAFF_APP_PIN || "1234",
-      receptionPin: process.env.STAFF_APP_PIN || "1234",
-    }
-  );
+  return null;
 }
 
 function getExpectedPinForRole(client, role, fallbackPin) {
@@ -998,31 +984,48 @@ function registerOpdStaffAppRoutes(app, deps) {
     }
   });
 
+  const missingIdHtml = `<!doctype html>
+  <html lang="hi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Invalid Link</title></head>
+  <body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#f3f6fb;margin:0;padding:20px;text-align:center;">
+    <div style="background:#fff;padding:28px;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,0.08);max-width:360px;">
+      <h2 style="color:#c5221f;margin:0 0 10px;">⚠️ अधूरा लिंक (Invalid URL)</h2>
+      <p style="color:#525252;font-size:14px;line-height:1.5;margin:0;">बिना Business ID के ऐप नहीं खुल सकता। कृपया अपने क्लिनिक का सही लिंक इस्तेमाल करें।</p>
+    </div>
+  </body></html>`;
+
   app.get("/reception-app", (req, res) => {
+    const bizId = String(req.query.businessId || req.query.opdId || "").trim();
+    if (!bizId) return res.status(400).send(missingIdHtml);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("reception", req.query.businessId || req.query.opdId || ""));
+    res.send(renderStandaloneAppHtml("reception", bizId));
   });
 
   app.get("/reception-app/:businessId", (req, res) => {
+    const bizId = String(req.params.businessId || "").trim();
+    if (!bizId) return res.status(400).send(missingIdHtml);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("reception", req.params.businessId || ""));
+    res.send(renderStandaloneAppHtml("reception", bizId));
   });
 
   app.get("/doctor-app", (req, res) => {
+    const bizId = String(req.query.businessId || req.query.opdId || "").trim();
+    if (!bizId) return res.status(400).send(missingIdHtml);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("doctor", req.query.businessId || req.query.opdId || ""));
+    res.send(renderStandaloneAppHtml("doctor", bizId));
   });
 
   app.get("/doctor-app/:businessId", (req, res) => {
+    const bizId = String(req.params.businessId || "").trim();
+    if (!bizId) return res.status(400).send(missingIdHtml);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.send(renderStandaloneAppHtml("doctor", req.params.businessId || ""));
+    res.send(renderStandaloneAppHtml("doctor", bizId));
   });
 
   app.get("/app", (req, res) => {
     const bizId = String(req.query.businessId || req.query.opdId || "").trim();
-    res.redirect(
-      bizId ? `/reception-app/${encodeURIComponent(bizId)}` : "/reception-app"
-    );
+    if (!bizId) return res.status(400).send(missingIdHtml);
+    res.redirect(`/reception-app/${encodeURIComponent(bizId)}`);
   });
 }
 
