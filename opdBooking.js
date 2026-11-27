@@ -52,9 +52,30 @@ function isDoctorAvailableOnDay(doc, dayOpt) {
   return normalizeAvailStatus(raw) === "P";
 }
 
+function getDoctorAvailSummary(doc, lang = "hi") {
+  const days = getDayOptions(lang);
+  return days
+    .map((d) => {
+      const ok = isDoctorAvailableOnDay(doc, d);
+      const badge = ok
+        ? lang === "en"
+          ? "Avail"
+          : "उपलब्ध"
+        : lang === "en"
+        ? "Off"
+        : "छुट्टी";
+      return `${d.shortLabel}: ${badge}`;
+    })
+    .join(" | ");
+}
+
 function parseBatches(rawBatch) {
-  if (!rawBatch) return ["Morning (09:00 AM - 01:00 PM)", "Evening (04:00 PM - 08:00 PM)"];
-  if (Array.isArray(rawBatch)) return rawBatch.map((x) => String(x).trim()).filter(Boolean);
+  if (!rawBatch) {
+    return ["Morning (09:00 AM - 01:00 PM)", "Evening (04:00 PM - 08:00 PM)"];
+  }
+  if (Array.isArray(rawBatch)) {
+    return rawBatch.map((x) => String(x).trim()).filter(Boolean);
+  }
   const parts = String(rawBatch)
     .split(/[|,\n;]/)
     .map((x) => x.trim())
@@ -106,12 +127,31 @@ async function loadDoctors(ctx) {
     }));
 }
 
-async function sendMainMenu(ctx, lang) {
+async function sendWelcomeAndLanguage(ctx) {
+  const bizName = ctx.business?.name || "OPD Clinic";
+  const msg =
+    `🙏 *${bizName}*\n` +
+    `स्वागत है! कृपया अपनी भाषा चुनें:\n` +
+    `Welcome! Please select your language:\n\n` +
+    `1️⃣ *हिंदी*\n` +
+    `2️⃣ *English*`;
+  await ctx.sendText(msg);
+}
+
+async function sendMainMenu(ctx, lang = "hi") {
   const bizName = ctx.business?.name || "OPD Clinic";
   const text =
     lang === "en"
-      ? `🏥 *${bizName}*\nHow can we help you today?\n\n1️⃣ *Book OPD Token*\n2️⃣ *Live Queue Status*\n3️⃣ *Change Language (हिंदी / English)*`
-      : `🏥 *${bizName}*\nआज हम आपकी क्या सेवा कर सकते हैं?\n\n1️⃣ *OPD टोकन बुक करें*\n2️⃣ *लाइव कतार देखें*\n3️⃣ *भाषा बदलें (हिंदी / English)*`;
+      ? `🏥 *${bizName}*\nHow can we help you today?\n\n` +
+        `1️⃣ *Book OPD Token*\n` +
+        `2️⃣ *Track Token / Live Queue*\n` +
+        `3️⃣ *Doctor Availability*\n` +
+        `4️⃣ *Change Language (हिंदी / English)*`
+      : `🏥 *${bizName}*\nआज हम आपकी क्या मदद कर सकते हैं?\n\n` +
+        `1️⃣ *OPD टोकन बुक करें*\n` +
+        `2️⃣ *टोकन ट्रैक करें / लाइव कतार*\n` +
+        `3️⃣ *डॉक्टर उपलब्धता देखें*\n` +
+        `4️⃣ *भाषा बदलें (हिंदी / English)*`;
 
   await ctx.sendText(text);
 }
@@ -132,13 +172,53 @@ async function sendDoctorList(ctx, lang, doctors) {
       : "👨‍⚕️ *डॉक्टर चुनें (नंबर लिखकर भेजें):*\n\n";
 
   doctors.forEach((doc, i) => {
+    const availLine = getDoctorAvailSummary(doc, lang);
     msg +=
       lang === "en"
-        ? `${i + 1}. *${doc.name}* (${doc.specialty}) — Fee: ₹${doc.opdFee}\n`
-        : `${i + 1}. *${doc.name}* (${doc.specialty}) — फ़ीस: ₹${doc.opdFee}\n`;
+        ? `${i + 1}. *${doc.name}* (${doc.specialty}) — Fee: ₹${doc.opdFee}\n   _${availLine}_\n`
+        : `${i + 1}. *${doc.name}* (${doc.specialty}) — फ़ीस: ₹${doc.opdFee}\n   _${availLine}_\n`;
   });
 
   msg += lang === "en" ? "\nReply *0* for Main Menu." : "\nमुख्य मेनू के लिए *0* लिखें।";
+  await ctx.sendText(msg);
+}
+
+async function sendDoctorAvailability(ctx, lang, doctors) {
+  if (!doctors.length) {
+    await ctx.sendText(
+      lang === "en"
+        ? "⚠️ No active doctors found right now."
+        : "⚠️ अभी कोई सक्रिय डॉक्टर उपलब्ध नहीं है।"
+    );
+    return;
+  }
+
+  let msg =
+    lang === "en"
+      ? "🩺 *Doctor Availability Schedule:*\n\n"
+      : "🩺 *डॉक्टर उपलब्धता शेड्यूल:*\n\n";
+
+  doctors.forEach((doc, i) => {
+    const days = getDayOptions(lang);
+    msg += `*${i + 1}. ${doc.name}* (${doc.specialty}) — ₹${doc.opdFee}\n`;
+    days.forEach((d) => {
+      const ok = isDoctorAvailableOnDay(doc, d);
+      const statusTxt = ok
+        ? lang === "en"
+          ? "✅ Available"
+          : "✅ उपलब्ध"
+        : lang === "en"
+        ? "❌ Not Available"
+        : "❌ अनुपलब्ध";
+      msg += `   • ${d.display}: ${statusTxt}\n`;
+    });
+    msg += `   • Batches: ${doc.batches.join(", ")}\n\n`;
+  });
+
+  msg +=
+    lang === "en"
+      ? "Reply *1* to Book Token or *0* for Main Menu."
+      : "टोकन बुक करने के लिए *1* या मुख्य मेनू के लिए *0* लिखें।";
   await ctx.sendText(msg);
 }
 
@@ -146,8 +226,8 @@ async function sendDayList(ctx, lang, doc) {
   const days = getDayOptions(lang);
   let msg =
     lang === "en"
-      ? `📅 *${doc.name}* — Select Day:\n\n`
-      : `📅 *${doc.name}* — दिन चुनें:\n\n`;
+      ? `📅 *${doc.name}* — Select Date:\n\n`
+      : `📅 *${doc.name}* — तारीख चुनें:\n\n`;
 
   days.forEach((d) => {
     const avail = isDoctorAvailableOnDay(doc, d);
@@ -168,8 +248,8 @@ async function sendDayList(ctx, lang, doc) {
 async function sendBatchList(ctx, lang, doc, dayOpt, batches) {
   let msg =
     lang === "en"
-      ? `⏰ *${doc.name}* (${dayOpt.display})\nSelect Time Batch:\n\n`
-      : `⏰ *${doc.name}* (${dayOpt.display})\nसमय बैच चुनें:\n\n`;
+      ? `⏰ *${doc.name}* (${dayOpt.display})\nSelect Time Slot:\n\n`
+      : `⏰ *${doc.name}* (${dayOpt.display})\nसमय स्लॉट चुनें:\n\n`;
 
   batches.forEach((b, i) => {
     msg += `${i + 1}. ${b}\n`;
@@ -195,7 +275,7 @@ async function finalizeBooking(ctx, lang, sessionData) {
   ).trim();
   const hasClientGateway = Boolean(cashfreeAppId && cashfreeSecretKey);
 
-  const advanceFee = hasClientGateway ? rawAdvance : 0;
+  const advanceFee = hasClientGateway && rawAdvance > 0 ? rawAdvance : 0;
 
   const patientName = sessionData.patientName;
   const patientAge = sessionData.patientAge;
@@ -256,42 +336,58 @@ async function finalizeBooking(ctx, lang, sessionData) {
       : `🙏 *${bizName}* में आपका स्वागत है! आपके उत्तम स्वास्थ्य की कामना करते हैं।`;
 
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+  const paymentUrl =
+    payLink?.shortUrl ||
+    payLink?.short_url ||
+    payLink?.link_url ||
+    payLink?.linkUrl ||
+    payLink?.payment_link ||
+    payLink?.url ||
+    "";
 
-  let confirmText =
+  let msg =
     `${greetingText}\n\n` +
     (lang === "en"
-      ? `✅ *OPD Token Confirmed*\n` +
+      ? `🎫 *OPD Token Issued*\n` +
         `• Token ID: *${tokenId}*\n` +
         `• Patient: *${patientName}* (${patientAge} yrs)\n` +
+        `• Mobile: *${patientPhone}*\n` +
         `• Doctor: *${doc.name}*\n` +
-        `• Day & Batch: *${dayText}* | *${batchSlot}*\n` +
-        `• OPD Fee: ₹${opdFee} | Online Advance: ₹${advanceFee}`
-      : `✅ *OPD टोकन कन्फ़र्म*\n` +
+        `• Date: *${dayText}*\n` +
+        `• Time Slot: *${batchSlot}*\n` +
+        `• OPD Fee: ₹${opdFee} | Advance: ₹${advanceFee}`
+      : `🎫 *OPD टोकन जारी*\n` +
         `• टोकन ID: *${tokenId}*\n` +
         `• मरीज़: *${patientName}* (${patientAge} वर्ष)\n` +
+        `• मोबाइल: *${patientPhone}*\n` +
         `• डॉक्टर: *${doc.name}*\n` +
-        `• दिन व बैच: *${dayText}* | *${batchSlot}*\n` +
-        `• OPD फ़ीस: ₹${opdFee} | ऑनलाइन एडवांस: ₹${advanceFee}`);
+        `• तारीख: *${dayText}*\n` +
+        `• समय स्लॉट: *${batchSlot}*\n` +
+        `• OPD फ़ीस: ₹${opdFee} | एडवांस: ₹${advanceFee}`);
 
-  const paymentUrl = payLink?.shortUrl || payLink?.link_url || payLink?.url || "";
   if (paymentUrl) {
-    confirmText +=
+    msg +=
       lang === "en"
-        ? `\n\n💳 *Pay Advance Online:* ${paymentUrl}`
-        : `\n\n💳 *ऑनलाइन एडवांस पेमेंट लिंक:* ${paymentUrl}`;
-  } else if (!hasClientGateway) {
-    confirmText +=
-      lang === "en"
-        ? `\n\n🏥 *Full payment (₹${opdFee}) to be paid at the clinic counter.*`
-        : `\n\n🏥 *पूरी फ़ीस (₹${opdFee}) क्लिनिक काउंटर पर देनी होगी।*`;
+        ? `\n\n💳 *Complete Advance Payment Here:*\n${paymentUrl}\n\n_Once paid, your token status will update automatically._`
+        : `\n\n💳 *एडवांस पेमेंट लिंक:*\n${paymentUrl}\n\n_पेमेंट के बाद आपका टोकन स्टेटस अपडेट हो जाएगा।_`;
   } else if (advanceFee > 0) {
-    confirmText +=
+    msg +=
       lang === "en"
-        ? `\n\n💳 Advance ₹${advanceFee} can be paid at the clinic counter.`
-        : `\n\n💳 एडवांस ₹${advanceFee} क्लिनिक काउंटर पर भी दिया जा सकता है।`;
+        ? `\n\n⚠️ Advance ₹${advanceFee} could not generate online link; you can pay ₹${opdFee} at the clinic counter.`
+        : `\n\n⚠️ ऑनलाइन एडवांस लिंक नहीं बन सका; आप क्लिनिक काउंटर पर ₹${opdFee} भुगतान कर सकते हैं।`;
+  } else {
+    msg +=
+      lang === "en"
+        ? `\n\n🏥 *Pay ₹${opdFee} at the clinic counter.*`
+        : `\n\n🏥 *क्लिनिक काउंटर पर ₹${opdFee} भुगतान करें।*`;
   }
 
-  await ctx.sendText(confirmText);
+  msg +=
+    lang === "en"
+      ? `\n\nReply *2* anytime to track your token.`
+      : `\n\nअपना टोकन ट्रैक करने के लिए कभी भी *2* भेजें।`;
+
+  await ctx.sendText(msg);
 }
 
 async function handleLiveQueue(ctx, lang, queryText) {
@@ -314,20 +410,29 @@ async function handleLiveQueue(ctx, lang, queryText) {
   if (!rows.length) {
     await ctx.sendText(
       lang === "en"
-        ? "ℹ️ No active token found for this query."
-        : "ℹ️ इस विवरण के लिए कोई सक्रिय टोकन नहीं मिला।"
+        ? "ℹ️ No token found for this Token ID / mobile number."
+        : "ℹ️ इस टोकन ID या मोबाइल नंबर के लिए कोई टोकन नहीं मिला।"
     );
     return;
   }
 
-  let out = lang === "en" ? "📋 *Live OPD Queue Status:*\n\n" : "📋 *लाइव OPD कतार स्टेटस:*\n\n";
+  let out =
+    lang === "en"
+      ? "📋 *Live Token & Queue Status:*\n\n"
+      : "📋 *लाइव टोकन व कतार स्टेटस:*\n\n";
+
   rows.slice(0, 8).forEach((r) => {
     const tId = r.Token_ID || r.tokenId || "-";
     const pName = r.Patient_Name || r.patientName || "-";
     const dName = r.Doctor_Name || r.doctorName || "-";
+    const vDate = String(r.Visit_Date || r.visitDate || "").slice(0, 10) || "-";
+    const bSlot = r.Batch_Slot || r.batchSlot || "-";
     const qSt = r.Queue_Status || r.queueStatus || "Waiting";
     const paySt = r.Payment_Status || r.paymentStatus || "Pay at Counter";
-    out += `• *${tId}* | ${pName} (${dName})\n  Status: *${qSt}* | Payment: *${paySt}*\n\n`;
+    out +=
+      `• *${tId}* — ${pName}\n` +
+      `  Dr: *${dName}* | ${vDate} (${bSlot})\n` +
+      `  Queue: *${qSt}* | Payment: *${paySt}*\n\n`;
   });
 
   await ctx.sendText(out.trim());
@@ -342,8 +447,19 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   const id = String(btnId || "").trim();
 
   if (text === "0" || text.toLowerCase() === "menu" || text === "मेनू") {
-    ctx.clearSession(true);
+    ctx.setSession({ lang, step: null, data: {} });
     await sendMainMenu(ctx, lang);
+    return;
+  }
+
+  // कोई भी नया अभिवादन भेजने पर Welcome + भाषा चुनाव से शुरू करें
+  const isGreeting = ["hi", "hii", "hello", "hey", "namaste", "नमस्ते", "start"].includes(
+    text.toLowerCase()
+  );
+
+  if (isGreeting && !step) {
+    ctx.setSession({ lang, step: "SELECT_LANG", data: {} });
+    await sendWelcomeAndLanguage(ctx);
     return;
   }
 
@@ -363,14 +479,19 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
 
   if (step === "LIVE_QUEUE_QUERY") {
     await handleLiveQueue(ctx, lang, text);
-    ctx.clearSession(true);
+    ctx.setSession({ lang, step: null, data: {} });
     return;
   }
 
   if (!step) {
-    if (text === "3" || id === "change_lang") {
-      ctx.setSession({ lang, step: "SELECT_LANG", data: {} });
-      await ctx.sendText("🌐 भाषा चुनें / Select Language:\n1. हिंदी\n2. English");
+    if (text === "1" || id === "book_opd") {
+      const doctors = await loadDoctors(ctx);
+      ctx.setSession({
+        lang,
+        step: "SELECT_DOCTOR",
+        data: { doctors },
+      });
+      await sendDoctorList(ctx, lang, doctors);
       return;
     }
 
@@ -384,20 +505,15 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       return;
     }
 
-    if (
-      text === "1" ||
-      id === "book_opd" ||
-      ["hi", "hello", "namaste", "नमस्ते", "book", "opd"].some((w) =>
-        text.toLowerCase().includes(w)
-      )
-    ) {
+    if (text === "3" || id === "doctor_avail") {
       const doctors = await loadDoctors(ctx);
-      ctx.setSession({
-        lang,
-        step: "SELECT_DOCTOR",
-        data: { doctors },
-      });
-      await sendDoctorList(ctx, lang, doctors);
+      await sendDoctorAvailability(ctx, lang, doctors);
+      return;
+    }
+
+    if (text === "4" || id === "change_lang") {
+      ctx.setSession({ lang, step: "SELECT_LANG", data: {} });
+      await sendWelcomeAndLanguage(ctx);
       return;
     }
 
