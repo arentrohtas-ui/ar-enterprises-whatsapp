@@ -35,9 +35,11 @@ function getUpcomingDays(lang = "hi") {
 function normalizeDoctorObj(raw = {}) {
   return {
     id: String(raw.id || raw.Doctor_ID || raw.doctorId || "").trim(),
-    name: String(raw.name || raw.Doctor_Name || raw.doctorName || "Doctor").trim(),
+    name: String(
+      raw.name || raw.Doctor_Name || raw.doctorName || "Doctor"
+    ).trim(),
     specialty: String(
-      raw.specialty || raw.Specialty || "General Physician"
+      raw.specialty || raw.Specialization || raw.Specialty || "General Physician"
     ).trim(),
     opdFee: toNumberClean(raw.opdFee ?? raw.OPD_Fee ?? raw.fee ?? 0, 0),
     advanceAmount: toNumberClean(
@@ -104,12 +106,18 @@ function getDoctorSlots(doc, lang = "hi") {
   if (!slots.length) {
     slots.push({
       id: "MORNING",
-      label: lang === "en" ? "Morning (09:00 AM - 01:00 PM)" : "सुबह (09:00 AM - 01:00 PM)",
+      label:
+        lang === "en"
+          ? "Morning (09:00 AM - 01:00 PM)"
+          : "सुबह (09:00 AM - 01:00 PM)",
       value: "09:00 AM - 01:00 PM",
     });
     slots.push({
       id: "EVENING",
-      label: lang === "en" ? "Evening (04:00 PM - 08:00 PM)" : "शाम (04:00 PM - 08:00 PM)",
+      label:
+        lang === "en"
+          ? "Evening (04:00 PM - 08:00 PM)"
+          : "शाम (04:00 PM - 08:00 PM)",
       value: "04:00 PM - 08:00 PM",
     });
   }
@@ -645,11 +653,17 @@ async function handleBookingStep(ctx, text, btnId) {
 
     if (payableAmount > 0 && typeof ctx.createRazorpayLink === "function") {
       try {
+        const sheetId = String(ctx.business?.sheetId || "").trim();
         const linkRes = await ctx.createRazorpayLink({
           amount: payableAmount,
           customerName: data.patientName,
           customerPhone: tenDigit,
           description: `${doc.name || "OPD"} - ${data.visitDate}`,
+          spreadsheetId: sheetId,
+          spreadsheet_id: sheetId,
+          businessName: ctx.business?.name || "City Care OPD",
+          cashfreeAppId: ctx.business?.cashfreeAppId || "",
+          cashfreeSecretKey: ctx.business?.cashfreeSecretKey || "",
         });
 
         const orderId = String(
@@ -657,6 +671,7 @@ async function handleBookingStep(ctx, text, btnId) {
             linkRes?.order_id ||
             linkRes?.linkId ||
             linkRes?.link_id ||
+            linkRes?.id ||
             ""
         ).trim();
         const payUrl = String(
