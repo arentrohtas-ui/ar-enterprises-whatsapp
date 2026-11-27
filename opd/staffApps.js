@@ -1,5 +1,30 @@
 const { formatIstYmd } = require("./menu");
 
+// Doctor App और Reception App के आइकन लिंक
+const DOCTOR_APP_ICON_URL =
+  "https://i.pinimg.com/736x/52/ac/3c/52ac3cf08aeb4ffe3a71970320fcdcb4.jpg";
+const RECEPTION_APP_ICON_URL =
+  "https://static.vecteezy.com/system/resources/previews/045/357/302/non_2x/reception-service-icon-hotel-outline-symbol-flat-suitable-for-website-logo-app-template-and-ui-design-free-vector.jpg";
+
+function getDefaultIconDataUri(appRole = "reception") {
+  const isDoctor = String(appRole).toLowerCase() === "doctor";
+  const bg = isDoctor ? "#0d9488" : "#0f62fe";
+  const symbol = isDoctor ? "+" : "OPD";
+  const svg = isDoctor
+    ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${bg}"/><rect x="220" y="128" width="72" height="256" rx="18" fill="#ffffff"/><rect x="128" y="220" width="256" height="72" rx="18" fill="#ffffff"/></svg>`
+    : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="${bg}"/><text x="256" y="286" font-family="system-ui,Arial,sans-serif" font-size="136" font-weight="800" fill="#ffffff" text-anchor="middle">${symbol}</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function resolveAppIconUrl(appRole = "reception") {
+  const isDoctor = String(appRole).toLowerCase() === "doctor";
+  const custom = isDoctor
+    ? String(DOCTOR_APP_ICON_URL || "").trim()
+    : String(RECEPTION_APP_ICON_URL || "").trim();
+  if (custom) return custom;
+  return getDefaultIconDataUri(appRole);
+}
+
 function normalizeDateYmd(input) {
   if (!input) return "";
   if (input instanceof Date && !Number.isNaN(input.getTime())) {
@@ -108,12 +133,22 @@ function renderStandaloneAppHtml(appRole, businessId = "") {
     ? "Doctor App — कुल मरीज़, कुल राशि, कतार व Present/Absent"
     : "Reception App — कतार, Cash Deposit व कुल शुल्क हिसाब";
   const todayIst = getTodayIstYmd();
+  const iconUrl = resolveAppIconUrl(appRole);
+  const manifestUrl = `/app-manifest.json?role=${encodeURIComponent(
+    appRole
+  )}&businessId=${encodeURIComponent(businessId)}`;
 
   return `<!doctype html>
 <html lang="hi">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="${isDoctor ? "#0d9488" : "#0f62fe"}" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="${pageTitle}${businessId ? ` (${businessId})` : ""}" />
+  <link rel="manifest" href="${manifestUrl}" />
+  <link rel="icon" href="${iconUrl}" />
+  <link rel="apple-touch-icon" href="${iconUrl}" />
   <title>${pageTitle}${businessId ? ` (${businessId})` : ""}</title>
   <style>
     :root {
@@ -766,6 +801,51 @@ function registerOpdStaffAppRoutes(app, deps) {
     }
     return { ok: true, client: targetClient };
   }
+
+  app.get("/app-manifest.json", (req, res) => {
+    const role =
+      String(req.query.role || "reception").trim().toLowerCase() === "doctor"
+        ? "doctor"
+        : "reception";
+    const bizId = String(req.query.businessId || "").trim();
+    const isDoctor = role === "doctor";
+    const appName = `${isDoctor ? "Doctor App" : "Reception App"}${
+      bizId ? ` - ${bizId}` : ""
+    }`;
+    const startUrl = bizId
+      ? `/${role}-app/${encodeURIComponent(bizId)}`
+      : `/${role}-app`;
+    const iconUrl = resolveAppIconUrl(role);
+
+    res.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+    res.json({
+      name: appName,
+      short_name: appName.slice(0, 24),
+      start_url: startUrl,
+      scope: "/",
+      display: "standalone",
+      background_color: "#f3f6fb",
+      theme_color: isDoctor ? "#0d9488" : "#0f62fe",
+      icons: [
+        {
+          src: iconUrl,
+          sizes: "192x192",
+          type: iconUrl.startsWith("data:image/svg+xml")
+            ? "image/svg+xml"
+            : "image/png",
+          purpose: "any maskable",
+        },
+        {
+          src: iconUrl,
+          sizes: "512x512",
+          type: iconUrl.startsWith("data:image/svg+xml")
+            ? "image/svg+xml"
+            : "image/png",
+          purpose: "any maskable",
+        },
+      ],
+    });
+  });
 
   app.post("/api/app/login", async (req, res) => {
     const check = await verifyStaffRequest(req);
