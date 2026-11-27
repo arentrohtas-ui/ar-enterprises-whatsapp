@@ -13,6 +13,130 @@ function normalizeTenDigitPhone(phone) {
   return digits;
 }
 
+function getCashfreeBaseUrl(appId, secretKey, paymentMode) {
+  const mode = String(paymentMode || process.env.CASHFREE_ENV || "")
+    .trim()
+    .toLowerCase();
+  const isTest =
+    String(appId || "")
+      .toUpperCase()
+      .startsWith("TEST") ||
+    String(secretKey || "")
+      .toLowerCase()
+      .includes("_test_");
+  return mode === "sandbox" || isTest
+    ? "https://sandbox.cashfree.com/pg"
+    : "https://api.cashfree.com/pg";
+}
+
+async function verifyPaymentFromCashfreeOrCtx(ctx, data, orderId) {
+  if (typeof ctx.checkCashfreePaymentStatus === "function") {
+    const ctxRes = await ctx.checkCashfreePaymentStatus({ orderId });
+    if (ctxRes?.status === "PAID") {
+      return ctxRes;
+    }
+  }
+
+  const appId = String(
+    data?.cashfreeAppId ||
+      ctx.business?.cashfreeAppId ||
+      process.env.CASHFREE_APP_ID ||
+      ""
+  ).trim();
+  const secretKey = String(
+    data?.cashfreeSecretKey ||
+      ctx.business?.cashfreeSecretKey ||
+      process.env.CASHFREE_SECRET_KEY ||
+      ""
+  ).trim();
+
+  if (!orderId || !appId || !secretKey) {
+    return { status: "PENDING" };
+  }
+
+  const base = getCashfreeBaseUrl(
+    appId,
+    secretKey,
+    data?.paymentMode || ctx.business?.paymentMode
+  );
+  const headers = {
+    "x-client-id": appId,
+    "x-client-secret": secretKey,
+    "x-api-version": "2023-08-01",
+    Accept: "application/json",
+  };
+
+  try {
+    const linkResp = await fetch(
+      `${base}/links/${encodeURIComponent(orderId)}`,
+      { method: "GET", headers }
+    );
+    if (linkResp.ok) {
+      const linkData = await linkResp.json();
+      const linkSt = String(linkData?.link_status || "").toUpperCase();
+      const paidAmt = Number(linkData?.link_amount_paid || 0);
+      const reqAmt = Number(linkData?.link_amount || 0);
+
+      if (
+        linkSt === "PAID" ||
+        (reqAmt > 0 && paidAmt >= reqAmt) ||
+        paidAmt > 0
+      ) {
+        return {
+          status: "PAID",
+          cf_payment_id: linkData?.cf_link_id || linkData?.link_id || orderId,
+        };
+      }
+
+      const ordersResp = await fetch(
+        `${base}/links/${encodeURIComponent(orderId)}/orders`,
+        { method: "GET", headers }
+      );
+      if (ordersResp.ok) {
+        const ordersData = await ordersResp.json();
+        const arr = Array.isArray(ordersData)
+          ? ordersData
+          : Array.isArray(ordersData?.orders)
+          ? ordersData.orders
+          : Array.isArray(ordersData?.data)
+          ? ordersData.data
+          : [];
+        const paidOrder = arr.find((o) =>
+          ["PAID", "SUCCESS", "COMPLETED"].includes(
+            String(o?.order_status || "").toUpperCase()
+          )
+        );
+        if (paidOrder) {
+          return {
+            status: "PAID",
+            cf_payment_id:
+              paidOrder?.cf_order_id || paidOrder?.order_id || orderId,
+          };
+        }
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const ordResp = await fetch(
+      `${base}/orders/${encodeURIComponent(orderId)}`,
+      { method: "GET", headers }
+    );
+    if (ordResp.ok) {
+      const ordData = await ordResp.json();
+      const st = String(ordData?.order_status || "").toUpperCase();
+      if (["PAID", "SUCCESS", "COMPLETED"].includes(st)) {
+        return {
+          status: "PAID",
+          cf_payment_id: ordData?.cf_order_id || ordData?.order_id || orderId,
+        };
+      }
+    }
+  } catch (_) {}
+
+  return { status: "PENDING" };
+}
+
 async function sendPaymentActionButtons(ctx, promptText, lang = "hi") {
   if (typeof ctx.sendWA === "function") {
     const waRes = await ctx.sendWA({
@@ -110,6 +234,9 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
     patientPhone: cleanPhone,
     opdFee,
     payableAmount,
+    cashfreeAppId: ctx.business?.cashfreeAppId || "",
+    cashfreeSecretKey: ctx.business?.cashfreeSecretKey || "",
+    paymentMode: ctx.business?.paymentMode || "",
   };
 
   const createLinkFn =
@@ -253,45 +380,43 @@ async function handleAwaitPaymentStep(
     ctx.registerPendingPayment(orderId, { ...data, lang });
   }
 
-  if (orderId && typeof ctx.checkCashfreePaymentStatus === "function") {
-    const statusRes = await ctx.checkCashfreePaymentStatus({ orderId });
-    if (statusRes?.status === "PAID") {
-      if (typeof ctx.confirmPendingBookingByOrderId === "function") {
-        const issued = await ctx.confirmPendingBookingByOrderId(
-          orderId,
-          statusRes.cf_payment_id || orderId
-        );
-        if (issued?.ok && issued?.tokenId) {
-          return;
-        }
-      }
-
-      if (typeof ctx.recordPaidBookingAndLog === "function") {
-        const tokenId = `OPD_${Date.now().toString().slice(-4)}`;
-        const doc = data.selectedDoctor || {};
-        await ctx.recordPaidBookingAndLog({
-          tokenId,
-          patientName: data.patientName || "Patient",
-          patientAge: data.patientAge || "",
-          patientPhone: normalizeTenDigitPhone(data.patientPhone),
-          doctorId: doc.id || "",
-          doctorName: doc.name || "",
-          visitDate: data.visitDate || "",
-          batchSlot: data.batchSlot || "",
-          opdFee: toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0),
-          advanceFee: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
-          paidAmount: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
-          paymentLinkId: orderId,
-          paymentRefId: statusRes.cf_payment_id || orderId,
-        });
-        ctx.clearSession(true);
-        await ctx.sendText(
-          lang === "en"
-            ? `✅ *Payment Received — OPD Token Confirmed*\n\n• Token No.: *${tokenId}*\n• Patient: *${data.patientName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
-            : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n• टोकन नंबर: *${tokenId}*\n• मरीज़: *${data.patientName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
-        );
+  const statusRes = await verifyPaymentFromCashfreeOrCtx(ctx, data, orderId);
+  if (statusRes?.status === "PAID") {
+    if (typeof ctx.confirmPendingBookingByOrderId === "function") {
+      const issued = await ctx.confirmPendingBookingByOrderId(
+        orderId,
+        statusRes.cf_payment_id || orderId
+      );
+      if (issued?.ok && issued?.tokenId) {
         return;
       }
+    }
+
+    if (typeof ctx.recordPaidBookingAndLog === "function") {
+      const tokenId = `OPD_${Date.now().toString().slice(-4)}`;
+      const doc = data.selectedDoctor || {};
+      await ctx.recordPaidBookingAndLog({
+        tokenId,
+        patientName: data.patientName || "Patient",
+        patientAge: data.patientAge || "",
+        patientPhone: normalizeTenDigitPhone(data.patientPhone),
+        doctorId: doc.id || "",
+        doctorName: doc.name || "",
+        visitDate: data.visitDate || "",
+        batchSlot: data.batchSlot || "",
+        opdFee: toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0),
+        advanceFee: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
+        paidAmount: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
+        paymentLinkId: orderId,
+        paymentRefId: statusRes.cf_payment_id || orderId,
+      });
+      ctx.clearSession(true);
+      await ctx.sendText(
+        lang === "en"
+          ? `✅ *Payment Received — OPD Token Confirmed*\n\n• Token No.: *${tokenId}*\n• Patient: *${data.patientName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
+          : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n• टोकन नंबर: *${tokenId}*\n• मरीज़: *${data.patientName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
+      );
+      return;
     }
   }
 
