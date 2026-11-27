@@ -11,6 +11,43 @@ function toNumberClean(val, fallback = 0) {
   return Number.isFinite(n) && cleaned !== "" ? n : fallback;
 }
 
+function getNowIstMinutes() {
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  return ist.getUTCHours() * 60 + ist.getUTCMinutes();
+}
+
+function parseSlotEndMinutes(slotStr = "") {
+  const s = String(slotStr || "").trim();
+  const rangeMatch = s.match(
+    /(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*[-–—to]+\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i
+  );
+  if (rangeMatch) {
+    const endPeriod = String(rangeMatch[6] || "").toUpperCase();
+    const startPeriod = String(rangeMatch[3] || endPeriod).toUpperCase();
+    let endHour = parseInt(rangeMatch[4], 10);
+    const endMin = parseInt(rangeMatch[5] || "0", 10);
+
+    if (endPeriod === "PM" && endHour < 12) endHour += 12;
+    if (endPeriod === "AM" && endHour === 12) endHour = 0;
+
+    let startHour = parseInt(rangeMatch[1], 10);
+    if (startPeriod === "PM" && startHour < 12) startHour += 12;
+    if (startPeriod === "AM" && startHour === 12) startHour = 0;
+
+    let endTotal = endHour * 60 + endMin;
+    const startTotal = startHour * 60;
+    if (endTotal <= startTotal) {
+      endTotal += 12 * 60;
+    }
+    return endTotal;
+  }
+
+  if (/morning|सुबह/i.test(s)) return 13 * 60;
+  if (/evening|शाम/i.test(s)) return 21 * 60;
+  if (/afternoon|दोपहर/i.test(s)) return 17 * 60;
+  return null;
+}
+
 function getUpcomingDays(lang = "hi") {
   const now = new Date();
   const labelsHi = ["आज", "कल", "परसों"];
@@ -77,7 +114,7 @@ function isDoctorAvailableOnDay(doc, dayKey) {
   return st !== "A" && st !== "ABSENT" && st !== "OFF";
 }
 
-function getDoctorSlots(doc, lang = "hi") {
+function getDoctorSlots(doc, lang = "hi", dayKey = "next") {
   const slots = [];
   if (doc.morningSlot) {
     slots.push({
@@ -117,6 +154,16 @@ function getDoctorSlots(doc, lang = "hi") {
       value: "04:00 PM - 08:00 PM",
     });
   }
+
+  if (dayKey === "today") {
+    const nowMins = getNowIstMinutes();
+    return slots.filter((s) => {
+      const endMins = parseSlotEndMinutes(`${s.value} ${s.label}`);
+      if (endMins === null) return true;
+      return endMins > nowMins;
+    });
+  }
+
   return slots;
 }
 
@@ -141,6 +188,49 @@ async function fetchClinicDoctors(ctx) {
   return [];
 }
 
+function extractTenDigitFromSender(fromVal = "") {
+  const digits = String(fromVal || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length >= 10) return digits.slice(-10);
+  return "";
+}
+
+async function sendPhonePromptWithSelfOption(ctx, lang = "hi") {
+  const selfTen = extractTenDigitFromSender(ctx.from);
+  const promptText =
+    lang === "en"
+      ? `📱 Type *10-digit Mobile Number* manually${
+          selfTen ? ` or tap *Self* button (${selfTen})` : ""
+        }:`
+      : `📱 *10 अंकों का मोबाइल नंबर* लिखें${
+          selfTen ? ` या *Self* बटन दबाएं (${selfTen})` : ""
+        }:`;
+
+  if (selfTen && typeof ctx.sendWA === "function") {
+    const waRes = await ctx.sendWA({
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: promptText },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: {
+                id: "SELF_MOBILE",
+                title: lang === "en" ? "Self Number" : "Self नंबर",
+              },
+            },
+          ],
+        },
+      },
+    });
+    if (waRes && !waRes.error && !waRes.errors) return;
+  }
+
+  await ctx.sendText(promptText);
+}
+
 async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
   const lines = doctors.map(
     (d, idx) =>
@@ -152,10 +242,8 @@ async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
   if (doctors.length <= 3 && typeof ctx.sendWA === "function") {
     const bodyText =
       lang === "en"
-        ? `👨‍⚕️ *Choose Doctor* (tap a button or reply number):\n\n${lines.join(
-            "\n"
-          )}`
-        : `👨‍⚕️ *डॉक्टर चुनें* (बटन दबाएं या नंबर लिखें):\n\n${lines.join("\n")}`;
+        ? `👨‍⚕️ *Choose Doctor*:\n\n${lines.join("\n")}`
+        : `👨‍⚕️ *डॉक्टर चुनें*:\n\n${lines.join("\n")}`;
 
     const buttons = doctors.map((d, idx) => ({
       type: "reply",
@@ -173,7 +261,7 @@ async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
         action: { buttons },
       },
     });
-    if (waRes && !waRes.error) return;
+    if (waRes && !waRes.error && !waRes.errors) return;
   }
 
   if (doctors.length > 3 && typeof ctx.sendWA === "function") {
@@ -193,7 +281,7 @@ async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
         body: {
           text:
             lang === "en"
-              ? "👨‍⚕️ *Choose Doctor* from the option list below:"
+              ? "👨‍⚕️ *Choose Doctor* from the list below:"
               : "👨‍⚕️ नीचे दिए गए विकल्प में से *डॉक्टर चुनें*:",
         },
         action: {
@@ -207,7 +295,7 @@ async function sendDoctorSelectionPrompt(ctx, doctors, lang = "hi") {
         },
       },
     });
-    if (waRes && !waRes.error) return;
+    if (waRes && !waRes.error && !waRes.errors) return;
   }
 
   await ctx.sendText(
@@ -244,7 +332,7 @@ async function sendDaySelectionPrompt(ctx, doctor, days, lang = "hi") {
         action: { buttons },
       },
     });
-    if (waRes && !waRes.error) return;
+    if (waRes && !waRes.error && !waRes.errors) return;
   }
 
   await ctx.sendText(
@@ -283,7 +371,7 @@ async function sendSlotSelectionPrompt(ctx, slots, lang = "hi") {
         action: { buttons },
       },
     });
-    if (waRes && !waRes.error) return;
+    if (waRes && !waRes.error && !waRes.errors) return;
   }
 
   await ctx.sendText(
@@ -347,14 +435,19 @@ async function handleBookingStep(ctx, text, btnId) {
       return;
     }
 
-    const days = getUpcomingDays(lang).filter((day) =>
-      isDoctorAvailableOnDay(picked, day.key)
-    );
+    const days = getUpcomingDays(lang).filter((day) => {
+      if (!isDoctorAvailableOnDay(picked, day.key)) return false;
+      if (day.key === "today") {
+        return getDoctorSlots(picked, lang, "today").length > 0;
+      }
+      return true;
+    });
+
     if (!days.length) {
       await ctx.sendText(
         lang === "en"
-          ? `${picked.name} is currently unavailable on upcoming days. Please choose another doctor.`
-          : `${picked.name} आगामी दिनों में उपलब्ध नहीं हैं। कृपया दूसरा डॉक्टर चुनें।`
+          ? `${picked.name} has no available slots right now. Please choose another doctor.`
+          : `${picked.name} के अभी कोई उपलब्ध समय स्लॉट नहीं बचे हैं। कृपया दूसरा डॉक्टर चुनें।`
       );
       return;
     }
@@ -395,7 +488,16 @@ async function handleBookingStep(ctx, text, btnId) {
       return;
     }
 
-    const slots = getDoctorSlots(data.selectedDoctor, lang);
+    const slots = getDoctorSlots(data.selectedDoctor, lang, dayInfo.key);
+    if (!slots.length) {
+      await ctx.sendText(
+        lang === "en"
+          ? `No slots remain for ${dayInfo.shortLabel}. Please choose another day.`
+          : `${dayInfo.shortLabel} के लिए अब कोई समय स्लॉट नहीं बचा है। कृपया दूसरा दिन चुनें।`
+      );
+      return;
+    }
+
     ctx.setSession({
       lang,
       step: "SELECT_SLOT",
@@ -482,25 +584,21 @@ async function handleBookingStep(ctx, text, btnId) {
       step: "ENTER_PHONE",
       data: { ...data, patientAge: String(ageNum) },
     });
-    await ctx.sendText(
-      lang === "en"
-        ? "📱 Please enter *10-digit Mobile Number*:"
-        : "📱 कृपया *10 अंकों का मोबाइल नंबर* लिखें:"
-    );
+    await sendPhonePromptWithSelfOption(ctx, lang);
     return;
   }
 
   if (step === "ENTER_PHONE") {
-    const digits = cleanText.replace(/\D/g, "");
+    const isSelfBtn =
+      cleanId === "SELF_MOBILE" || /^self\b/i.test(cleanText);
+    const digits = isSelfBtn
+      ? String(ctx.from || "").replace(/\D/g, "")
+      : cleanText.replace(/\D/g, "");
     const tenDigit =
-      digits.length === 12 && digits.startsWith("91") ? digits.slice(2) : digits;
+      digits.length >= 10 ? digits.slice(-10) : digits;
 
     if (tenDigit.length !== 10) {
-      await ctx.sendText(
-        lang === "en"
-          ? "Please enter a valid 10-digit mobile number."
-          : "कृपया सही 10 अंकों का मोबाइल नंबर लिखें।"
-      );
+      await sendPhonePromptWithSelfOption(ctx, lang);
       return;
     }
 
@@ -515,7 +613,7 @@ async function handleBookingStep(ctx, text, btnId) {
   }
 
   if (step === "AWAIT_PAYMENT") {
-    await handleAwaitPaymentStep(ctx, data, lang);
+    await handleAwaitPaymentStep(ctx, data, lang, cleanText, cleanId);
   }
 }
 
