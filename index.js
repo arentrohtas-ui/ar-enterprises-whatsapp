@@ -1,337 +1,254 @@
 const express = require("express");
-const crypto = require("crypto");
-const opdFlow = require("./opdBooking");
-const {
-  getUserState,
-  setUserState,
-  clearUserState,
-  saveBusinessData,
-  fetchBusinessData,
-} = require("./dataStore");
+const opdBooking = require("./opdBooking");
+const { createCashfreeLink, handleCashfreeWebhook } = require("./cashfreeHelper");
 
 const app = express();
-app.use(
-  express.json({
-    verify: (req, _, buf) => {
-      req.rawBody = buf;
-    },
-  })
-);
+app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "ar_enterprises_verify_123";
-const DEFAULT_TOKEN = process.env.ACCESS_TOKEN || "";
-const DEFAULT_PHONE_ID = process.env.PHONE_NUMBER_ID || "";
-const SHEET_URL = process.env.WEBHOOK_SINK_URL || "";
-const DEFAULT_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
-const MASTER_SHEET_ID = process.env.MASTER_SHEET_ID || DEFAULT_SHEET_ID;
-const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "";
+const sessions = new Map();
+const GAS_WEBAPP_URL = String(process.env.GAS_WEBAPP_URL || "").trim();
+const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "ar_opd_verify_token").trim();
 
-let masterCache = { expiresAt: 0, byPhoneId: {}, list: [] };
+function getSessionKey(phoneId, from) {
+  return `${phoneId || "default"}:${from || "user"}`;
+}
 
-async function syncMasterSheet(force = false) {
-  if (!force && Date.now() < masterCache.expiresAt) {
-    return masterCache;
+async function callGas(method = "GET", paramsOrBody = {}) {
+  if (!GAS_WEBAPP_URL) {
+    return { ok: false, error: "GAS_WEBAPP_URL missing" };
   }
-  if (!SHEET_URL || !MASTER_SHEET_ID) return masterCache;
 
-  try {
-    const qs = new URLSearchParams({
-      action: "get_clients",
-      master_sheet_id: MASTER_SHEET_ID,
-    });
-    const res = await fetch(`${SHEET_URL}?${qs.toString()}`);
-    const data = await res.json();
-    if (data?.ok && Array.isArray(data.clients)) {
-      const byPhoneId = {};
-      for (const c of data.clients) {
-        if (c.phoneId) byPhoneId[c.phoneId] = c;
+  if (method === "GET") {
+    const url = new URL(GAS_WEBAPP_URL);
+    Object.entries(paramsOrBody).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && String(v) !== "") {
+        url.searchParams.set(k, String(v));
       }
-      masterCache = {
-        expiresAt: Date.now() + 60 * 1000,
-        byPhoneId,
-        list: data.clients,
-      };
-    }
-  } catch (e) {
-    console.error("Master sheet sync error:", e.message);
-  }
-  return masterCache;
-}
-
-async function resolveBusiness(phoneId, extra = {}) {
-  const cache = await syncMasterSheet(false);
-  const found =
-    (phoneId && cache.byPhoneId[phoneId]) ||
-    (extra.businessId &&
-      cache.list.find(
-        (c) => String(c.businessId || "").trim() === String(extra.businessId).trim()
-      )) ||
-    null;
-
-  if (found) {
-    return {
-      id: found.businessId || phoneId || "default_opd",
-      name: found.name || "OPD Clinic",
-      sector: "opd",
-      phoneId: found.phoneId || phoneId || DEFAULT_PHONE_ID,
-      token: found.token || DEFAULT_TOKEN,
-      sheetId: found.sheetId || DEFAULT_SHEET_ID,
-      razorpayKeyId: found.razorpayKeyId || process.env.RAZORPAY_KEY_ID || "",
-      razorpayKeySecret: found.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET || "",
-      razorpayAccountId: found.razorpayAccountId || "",
-      advanceAmount: Number(found.advanceAmount || 0),
-    };
-  }
-
-  return {
-    id: DEFAULT_PHONE_ID || "default_opd",
-    name: "AR Enterprises OPD",
-    sector: "opd",
-    phoneId: phoneId || DEFAULT_PHONE_ID,
-    token: DEFAULT_TOKEN,
-    sheetId: extra.sheetId || DEFAULT_SHEET_ID,
-    razorpayKeyId: process.env.RAZORPAY_KEY_ID || "",
-    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || "",
-    razorpayAccountId: "",
-    advanceAmount: 0,
-  };
-}
-
-const seenMessages = new Set();
-
-async function sendWA(business, to, payload) {
-  if (!business.token || !business.phoneId || !to) return;
-  await fetch(`https://graph.facebook.com/v27.0/${business.phoneId}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${business.token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ messaging_product: "whatsapp", to, ...payload }),
-  }).catch((e) => console.error("WA send error:", e.message));
-}
-
-const sendText = (business, to, body) =>
-  sendWA(business, to, { type: "text", text: { preview_url: false, body } });
-
-const sendLangMenu = (business, to) =>
-  sendWA(business, to, {
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: `🏥 *${business.name}*\nनमस्ते / Hello! भाषा चुनें / Choose language:`,
-      },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "lang_hi", title: "हिंदी" } },
-          { type: "reply", reply: { id: "lang_en", title: "English" } },
-        ],
-      },
-    },
-  });
-
-async function createRazorpayLink(
-  business,
-  { amountInRupees, tokenId, patientName, phone, description }
-) {
-  const amt = Number(amountInRupees || 0);
-  if (!business.razorpayKeyId || !business.razorpayKeySecret || amt <= 0) {
-    return null;
-  }
-  try {
-    const auth = Buffer.from(
-      `${business.razorpayKeyId}:${business.razorpayKeySecret}`
-    ).toString("base64");
-    const cleanPhone = String(phone || "").replace(/\D/g, "").slice(-10);
-
-    const res = await fetch("https://api.razorpay.com/v1/payment_links", {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        amount: Math.round(amt * 100),
-        currency: "INR",
-        description: description || `${business.name} - Token ${tokenId}`,
-        customer: {
-          name: patientName || "Patient",
-          ...(cleanPhone.length === 10 ? { contact: `+91${cleanPhone}` } : {}),
-        },
-        notify: { sms: false, email: false },
-        notes: {
-          businessId: business.id || "",
-          phoneNumberId: business.phoneId || "",
-          sheetId: business.sheetId || "",
-          tokenId: tokenId || "",
-          patientName: patientName || "",
-          patientPhone: phone || "",
-        },
-      }),
     });
-
-    const data = await res.json();
-    if (data?.short_url) {
-      return { id: data.id, shortUrl: data.short_url };
-    }
-  } catch (e) {
-    console.error("Razorpay payment link error:", e.message);
+    const r = await fetch(url.toString());
+    return r.json();
   }
-  return null;
+
+  const r = await fetch(GAS_WEBAPP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(paramsOrBody),
+  });
+  return r.json();
 }
 
-function createContext(business, from) {
+function normalizeClientRow(raw = {}, fallbackPhoneId = "") {
   return {
-    tenant: business,
-    business,
-    from,
-    sheetUrl: SHEET_URL,
-    getSession: () => getUserState(business.id, from),
-    setSession: (patch) => setUserState(business.id, from, patch),
-    clearSession: (keepLang = true) => clearUserState(business.id, from, keepLang),
-    sendWA: (payload) => sendWA(business, from, payload),
-    sendText: (body) => sendText(business, from, body),
-    sendLangMenu: () => sendLangMenu(business, from),
-    createRazorpayLink: (opts) => createRazorpayLink(business, opts),
-    postSheet: (payload) =>
-      saveBusinessData({ tenant: business, from, sheetUrl: SHEET_URL }, payload),
-    getSheet: (params) =>
-      fetchBusinessData({ tenant: business, from, sheetUrl: SHEET_URL }, params),
+    id: String(raw.Business_ID || raw.businessId || raw.id || "").trim(),
+    name: String(raw.Business_Name || raw.businessName || raw.name || "OPD Clinic").trim(),
+    category: String(raw.Category || raw.category || "opd").trim(),
+    phoneId: String(
+      raw.Phone_Number_ID || raw.phoneNumberId || raw.phoneId || fallbackPhoneId || ""
+    ).trim(),
+    token: String(
+      raw.WhatsApp_Token || raw.whatsappToken || raw.token || process.env.WA_TOKEN || ""
+    ).trim(),
+    sheetId: String(
+      raw.Client_Sheet_ID ||
+        raw.clientSheetId ||
+        raw.sheetId ||
+        process.env.DEFAULT_CLINIC_SHEET_ID ||
+        ""
+    ).trim(),
+    cashfreeAppId: String(
+      raw.Cashfree_App_ID ||
+        raw.cashfreeAppId ||
+        raw.Cashfree_Key_ID ||
+        raw.cashfreeKeyId ||
+        ""
+    ).trim(),
+    cashfreeSecretKey: String(
+      raw.Cashfree_Secret_Key ||
+        raw.cashfreeSecretKey ||
+        raw.Cashfree_Key_Secret ||
+        raw.cashfreeKeySecret ||
+        ""
+    ).trim(),
+    advanceAmount: Number(
+      raw.Advance_Amount ?? raw.advanceAmount ?? process.env.DEFAULT_ADVANCE_AMOUNT ?? 0
+    ),
+    status: String(raw.Status || raw.status || "ACTIVE").trim().toUpperCase(),
   };
 }
 
-app.get("/", (_, res) => res.send("AR Enterprises OPD Engine Running"));
+async function resolveBusiness(phoneNumberId) {
+  const res = await callGas("GET", { action: "get_clients" });
+  const rawList = Array.isArray(res?.clients)
+    ? res.clients
+    : Array.isArray(res?.data)
+    ? res.data
+    : [];
 
-app.get("/webhook", (req, res) => {
-  if (
-    req.query["hub.mode"] === "subscribe" &&
-    req.query["hub.verify_token"] === VERIFY_TOKEN
-  ) {
-    return res.status(200).send(req.query["hub.challenge"]);
-  }
-  res.sendStatus(403);
+  const clients = rawList
+    .map((item) => normalizeClientRow(item, phoneNumberId))
+    .filter((c) => c.status !== "INACTIVE" && c.status !== "DISABLED");
+
+  const matched = clients.find(
+    (c) => phoneNumberId && String(c.phoneId).trim() === String(phoneNumberId).trim()
+  );
+
+  return (
+    matched ||
+    clients[0] ||
+    normalizeClientRow(
+      {
+        Business_Name: "OPD Clinic",
+        Phone_Number_ID: phoneNumberId || "",
+        WhatsApp_Token: process.env.WA_TOKEN || "",
+        Client_Sheet_ID: process.env.DEFAULT_CLINIC_SHEET_ID || "",
+        Advance_Amount: Number(process.env.DEFAULT_ADVANCE_AMOUNT || 0),
+        Status: "ACTIVE",
+      },
+      phoneNumberId
+    )
+  );
+}
+
+function buildCtx(business, from) {
+  const key = getSessionKey(business.phoneId, from);
+
+  return {
+    from,
+    business,
+    getSession: () => sessions.get(key) || { lang: "hi", step: null, data: {} },
+    setSession: (next) => {
+      const prev = sessions.get(key) || { lang: "hi", step: null, data: {} };
+      sessions.set(key, {
+        lang: next.lang || prev.lang || "hi",
+        step: next.step !== undefined ? next.step : prev.step,
+        data: next.data !== undefined ? next.data : prev.data,
+      });
+    },
+    clearSession: (keepLang = true) => {
+      const prev = sessions.get(key) || { lang: "hi" };
+      sessions.set(key, {
+        lang: keepLang ? prev.lang || "hi" : "hi",
+        step: null,
+        data: {},
+      });
+    },
+    getSheet: (params) =>
+      callGas("GET", { ...params, spreadsheet_id: business.sheetId }),
+    postSheet: (payload) =>
+      callGas("POST", { ...payload, spreadsheetId: business.sheetId }),
+    createRazorpayLink: (opts) =>
+      createCashfreeLink({
+        ...opts,
+        spreadsheetId: business.sheetId,
+        businessName: business.name,
+        cashfreeAppId: business.cashfreeAppId,
+        cashfreeSecretKey: business.cashfreeSecretKey,
+      }),
+    sendText: async (body) => {
+      if (!business.phoneId || !business.token) {
+        console.log("[WA TEXT]", from, body);
+        return { ok: true, simulated: true };
+      }
+      const r = await fetch(
+        `https://graph.facebook.com/v21.0/${business.phoneId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${business.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to: from,
+            type: "text",
+            text: { body },
+          }),
+        }
+      );
+      return r.json();
+    },
+    sendWA: async (payload) => {
+      if (!business.phoneId || !business.token) {
+        console.log("[WA INTERACTIVE]", from, JSON.stringify(payload));
+        return { ok: true, simulated: true };
+      }
+      const r = await fetch(
+        `https://graph.facebook.com/v21.0/${business.phoneId}/messages`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${business.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to: from,
+            ...payload,
+          }),
+        }
+      );
+      return r.json();
+    },
+  };
+}
+
+app.get("/", (req, res) => {
+  res.status(200).json({ ok: true, service: "AR Enterprises OPD Engine" });
 });
 
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+// Meta WhatsApp Webhook Verification
+app.get("/webhook/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.status(403).send("Forbidden");
+});
+
+// Cashfree Webhook Endpoint
+app.post("/webhook/cashfree", handleCashfreeWebhook);
+
+// Meta WhatsApp Incoming Message Endpoint
+app.post("/webhook/whatsapp", async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
-    const value = entry?.changes?.[0]?.value;
+    const change = entry?.changes?.[0];
+    const value = change?.value || {};
     const msg = value?.messages?.[0];
-    if (!msg || seenMessages.has(msg.id)) return;
-    seenMessages.add(msg.id);
+    if (!msg) return res.status(200).json({ ok: true });
 
-    const incomingPhoneId = value.metadata?.phone_number_id;
-    const business = await resolveBusiness(incomingPhoneId);
-    const ctx = createContext(business, msg.from);
+    const from = msg.from;
+    const phoneNumberId = value?.metadata?.phone_number_id || "";
+    const business = await resolveBusiness(phoneNumberId);
+    const ctx = buildCtx(business, from);
 
-    const btn = msg.interactive?.button_reply || msg.interactive?.list_reply;
-    const text = (msg.text?.body || btn?.title || "").trim();
-    const btnId = btn?.id || "";
-    const low = text.toLowerCase();
+    let text = "";
+    let btnId = "";
 
-    if (low === "sync_clients") {
-      await syncMasterSheet(true);
-      return sendText(business, msg.from, "✅ Master sheet synced.");
-    }
-
-    if (["hi", "hello", "start", "lang"].includes(low) || btnId === "act_lang") {
-      clearUserState(business.id, msg.from, true);
-      return sendLangMenu(business, msg.from);
-    }
-
-    if (btnId === "lang_hi" || low === "हिंदी") {
-      setUserState(business.id, msg.from, { lang: "hi", step: null, data: {} });
-      return opdFlow.sendHomeMenu(ctx, "hi");
-    }
-
-    if (btnId === "lang_en" || low === "english") {
-      setUserState(business.id, msg.from, { lang: "en", step: null, data: {} });
-      return opdFlow.sendHomeMenu(ctx, "en");
-    }
-
-    await opdFlow.handleMessage(ctx, text, btnId);
-  } catch (err) {
-    console.error("Webhook error:", err.message);
-  }
-});
-
-app.post("/razorpay-webhook", async (req, res) => {
-  try {
-    if (RAZORPAY_WEBHOOK_SECRET && req.rawBody) {
-      const sig = req.headers["x-razorpay-signature"] || "";
-      const expected = crypto
-        .createHmac("sha256", RAZORPAY_WEBHOOK_SECRET)
-        .update(req.rawBody)
-        .digest("hex");
-      if (sig !== expected) return res.sendStatus(400);
-    }
-
-    const event = req.body?.event || "";
-    const paymentEntity = req.body?.payload?.payment?.entity || {};
-    const linkEntity = req.body?.payload?.payment_link?.entity || {};
-    const notes = linkEntity.notes || paymentEntity.notes || {};
-
-    if (event === "payment.captured" || event === "payment_link.paid") {
-      const business = await resolveBusiness(notes.phoneNumberId, {
-        businessId: notes.businessId,
-        sheetId: notes.sheetId,
-      });
-      const ctx = createContext(business, notes.patientPhone || "");
-      const paidAmount = Math.round(
-        Number(paymentEntity.amount || linkEntity.amount || 0) / 100
-      );
-
-      await ctx.postSheet({
-        action: "mark_payment_paid",
-        spreadsheetId: notes.sheetId || business.sheetId,
-        businessId: business.id,
-        razorpayAccountId: business.razorpayAccountId || "",
-        tokenId: notes.tokenId || "",
-        paymentLinkId: linkEntity.id || "",
-        razorpayPaymentId: paymentEntity.id || "",
-        patientName: notes.patientName || "",
-        phone: notes.patientPhone || "",
-        paidAmount,
-      });
-
-      if (notes.patientPhone) {
-        await sendText(
-          business,
-          notes.patientPhone,
-          `✅ *Payment Confirmed — ${business.name}*\n` +
-            `• Token ID: *${notes.tokenId || "-"}*\n` +
-            `• Paid Amount: *₹${paidAmount}*\n` +
-            `• Payment ID: *${paymentEntity.id || "-"}*\n\n` +
-            `आपकी बुकिंग पक्की हो गई है। लाइव कतार के लिए *STATUS* लिखें।`
-        );
+    if (msg.type === "text") {
+      text = msg.text?.body || "";
+    } else if (msg.type === "interactive") {
+      if (msg.interactive?.type === "button_reply") {
+        btnId = msg.interactive.button_reply?.id || "";
+        text = msg.interactive.button_reply?.title || "";
+      } else if (msg.interactive?.type === "list_reply") {
+        btnId = msg.interactive.list_reply?.id || "";
+        text = msg.interactive.list_reply?.title || "";
       }
     }
 
-    res.json({ ok: true });
+    await opdBooking.handleMessage(ctx, text, btnId);
+    return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error("Razorpay webhook error:", err.message);
-    res.status(500).json({ ok: false });
+    console.error("WA Webhook Error:", err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-app.post("/run-reminders", async (req, res) => {
-  try {
-    const phoneId = req.body?.phoneNumberId || DEFAULT_PHONE_ID;
-    const business = await resolveBusiness(phoneId, {
-      businessId: req.body?.businessId,
-      sheetId: req.body?.sheetId,
-    });
-    const ctx = createContext(business, "");
-    const result = opdFlow.sendDueReminders
-      ? await opdFlow.sendDueReminders(ctx)
-      : { sent: 0 };
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`AR Enterprises OPD Engine running on ${PORT}`);
 });
-
-app.listen(PORT, () => console.log(`AR Enterprises OPD Engine running on ${PORT}`));
