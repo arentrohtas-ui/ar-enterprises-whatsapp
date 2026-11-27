@@ -19,12 +19,37 @@ const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const TOKEN_PREFIX = "OPD_";
 const TOKEN_START_NUMBER = 101;
 
+function normalizeDateYmd(input) {
+  if (!input) return "";
+  if (input instanceof Date && !Number.isNaN(input.getTime())) {
+    const ist = new Date(input.getTime() + IST_OFFSET_MS);
+    const y = ist.getUTCFullYear();
+    const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(ist.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(input).trim();
+  if (!s) return "";
+
+  const ymdMatch = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (ymdMatch) {
+    return `${ymdMatch[1]}-${String(ymdMatch[2]).padStart(2, "0")}-${String(
+      ymdMatch[3]
+    ).padStart(2, "0")}`;
+  }
+
+  const dmyMatch = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmyMatch) {
+    return `${dmyMatch[3]}-${String(dmyMatch[2]).padStart(2, "0")}-${String(
+      dmyMatch[1]
+    ).padStart(2, "0")}`;
+  }
+
+  return s.slice(0, 10);
+}
+
 function getTodayIstYmd() {
-  const ist = new Date(Date.now() + IST_OFFSET_MS);
-  const y = ist.getUTCFullYear();
-  const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(ist.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return normalizeDateYmd(new Date());
 }
 
 function formatPhoneWith91(phone) {
@@ -281,7 +306,7 @@ async function recordPaidBookingAndLog({
     patientPhone,
     doctorId: doctorId || "",
     doctorName: doctorName || "",
-    visitDate,
+    visitDate: normalizeDateYmd(visitDate),
     batchSlot,
     opdFee,
     advanceFee,
@@ -341,7 +366,7 @@ async function confirmPendingBookingByOrderId(orderId, paymentRefId = "") {
   const balanceAmount = Math.max(0, opdFee - payableAmount);
   const lang = pending.lang === "en" ? "en" : "hi";
   const dayLabel = pending.dayInfo?.shortLabel || "";
-  const visitDate = String(pending.visitDate || "").slice(0, 10);
+  const visitDate = normalizeDateYmd(pending.visitDate);
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
   const finalRefId = paymentRefId || cleanOrderId;
 
@@ -492,55 +517,6 @@ async function verifyCashfreeOrderDirect({
   return { status: "PENDING" };
 }
 
-async function runScheduledReminders(visitDateInput = "") {
-  const visitDate = String(visitDateInput || "").slice(0, 10) || getTodayIstYmd();
-  const clients = await getActiveClients();
-  let totalSent = 0;
-
-  for (const client of clients) {
-    if (!client.sheetId) continue;
-    const dueRes = await callGas("GET", {
-      action: "get_due_reminders",
-      spreadsheet_id: client.sheetId,
-      visitDate,
-    });
-    const dueList = Array.isArray(dueRes?.reminders) ? dueRes.reminders : [];
-
-    for (const row of dueList) {
-      const tokenId = String(row.Token_ID || "").trim();
-      const patientName = String(row.Patient_Name || "Patient").trim();
-      const patientPhone = String(row.Patient_Phone || "").trim();
-      const doctorName = String(row.Doctor_Name || "Doctor").trim();
-      const batchSlot = String(row.Batch_Slot || "").trim();
-      const vDate = String(row.Visit_Date || visitDate).slice(0, 10);
-
-      if (!tokenId || !patientPhone) continue;
-
-      const msg =
-        `⏰ *${client.name || "City Care OPD"} — OPD रिमाइंडर*\n\n` +
-        `नमस्ते *${patientName}*,\n` +
-        `आपका टोकन *${tokenId}* (${vDate}) के लिए दर्ज है।\n` +
-        `• डॉक्टर: *${doctorName}*\n` +
-        `• बैच: *${batchSlot}*\n\n` +
-        `कृपया समय से क्लिनिक पहुँचें।`;
-
-      const waRes = await sendWhatsAppText(client, patientPhone, msg);
-      if (waRes && !waRes.error) {
-        await callGas("POST", {
-          action: "mark_reminder_sent",
-          spreadsheetId: client.sheetId,
-          spreadsheet_id: client.sheetId,
-          tokenId,
-          reminderSent: "Yes",
-        });
-        totalSent += 1;
-      }
-    }
-  }
-
-  return { ok: true, visitDate, totalSent };
-}
-
 function buildCtx(business, from) {
   const key = getSessionKey(business.phoneId, from);
 
@@ -636,9 +612,12 @@ function isValidStaffPin(req) {
   return pin && pin === STAFF_APP_PIN;
 }
 
-app.get("/", (req, res) => {
-  res.status(200).send("AR Enterprises OPD Engine is running.");
-});
+function normalizeBookingsList(rawBookings = []) {
+  return (Array.isArray(rawBookings) ? rawBookings : []).map((b) => ({
+    ...b,
+    Visit_Date: normalizeDateYmd(b.Visit_Date || b.visitDate || ""),
+  }));
+}
 
 app.post("/api/app/login", (req, res) => {
   const pin = String(req.body?.pin || "").trim();
@@ -654,9 +633,7 @@ app.get("/api/app/data", async (req, res) => {
       return res.status(401).json({ ok: false, error: "Unauthorized PIN" });
     }
     const clients = await getActiveClients();
-    const requestedSheetId = String(
-      req.query.sheetId || process.env.DEFAULT_CLINIC_SHEET_ID || ""
-    ).trim();
+    const requestedSheetId = String(req.query.sheetId || "").trim();
     const activeClient =
       clients.find((c) => c.sheetId === requestedSheetId) ||
       clients[0] || {
@@ -682,14 +659,7 @@ app.get("/api/app/data", async (req, res) => {
     const dataRes = await callGas("GET", {
       action: "get_dashboard_data",
       spreadsheet_id: activeClient.sheetId,
-      spreadsheetId: activeClient.sheetId,
     });
-
-    const rawBookings = Array.isArray(dataRes?.bookings) ? dataRes.bookings : [];
-    const normalizedBookings = rawBookings.map((b) => ({
-      ...b,
-      Visit_Date: String(b.Visit_Date || b.visitDate || "").slice(0, 10),
-    }));
 
     return res.status(200).json({
       ok: true,
@@ -705,7 +675,7 @@ app.get("/api/app/data", async (req, res) => {
         sheetId: activeClient.sheetId,
       },
       doctors: Array.isArray(dataRes?.doctors) ? dataRes.doctors : [],
-      bookings: normalizedBookings,
+      bookings: normalizeBookingsList(dataRes?.bookings),
     });
   } catch (err) {
     console.error("App Data Error:", err);
@@ -750,7 +720,7 @@ app.post("/api/app/queue-status", async (req, res) => {
     return res.status(200).json({
       ok: true,
       notified2AheadToken: notifiedToken,
-      bookings: Array.isArray(gasRes?.bookings) ? gasRes.bookings : [],
+      bookings: normalizeBookingsList(gasRes?.bookings),
     });
   } catch (err) {
     console.error("Queue Status Update Error:", err);
@@ -892,8 +862,8 @@ function renderStandaloneAppHtml(appRole) {
     .container { max-width: 720px; margin: 0 auto; padding: 14px; }
     .filters {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
+      grid-template-columns: 1fr 1fr auto;
+      gap: 8px;
       margin-bottom: 14px;
     }
     select, input[type="date"] {
@@ -1016,6 +986,7 @@ function renderStandaloneAppHtml(appRole) {
         <select id="doctorFilter" onchange="renderView()">
           <option value="ALL">सभी डॉक्टर / All Doctors</option>
         </select>
+        <button class="btn btn-ghost" onclick="clearDateFilter()">सब तारीख</button>
       </div>
 
       <div class="banner">
@@ -1052,12 +1023,27 @@ function renderStandaloneAppHtml(appRole) {
     let PIN = "";
     let state = { clinic: null, doctors: [], bookings: [] };
 
+    function toYmd(val) {
+      if (!val) return "";
+      const s = String(val).trim();
+      const ymd = s.match(/^(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})/);
+      if (ymd) return \`\${ymd[1]}-\${String(ymd[2]).padStart(2, "0")}-\${String(ymd[3]).padStart(2, "0")}\`;
+      const dmy = s.match(/^(\\d{1,2})[-/](\\d{1,2})[-/](\\d{4})/);
+      if (dmy) return \`\${dmy[3]}-\${String(dmy[2]).padStart(2, "0")}-\${String(dmy[1]).padStart(2, "0")}\`;
+      return s.slice(0, 10);
+    }
+
     function showToast(msg) {
       const el = document.getElementById("toast");
       el.textContent = msg;
       el.style.display = "block";
       clearTimeout(window._t);
       window._t = setTimeout(() => { el.style.display = "none"; }, 3000);
+    }
+
+    function clearDateFilter() {
+      document.getElementById("dateFilter").value = "";
+      renderView();
     }
 
     async function unlockApp() {
@@ -1075,7 +1061,7 @@ function renderStandaloneAppHtml(appRole) {
       PIN = pin;
       document.getElementById("lockScreen").style.display = "none";
       document.getElementById("appShell").style.display = "block";
-      document.getElementById("dateFilter").value = d.today || new Date().toISOString().slice(0, 10);
+      document.getElementById("dateFilter").value = d.today || "";
       await loadAllData();
     }
 
@@ -1164,11 +1150,11 @@ function renderStandaloneAppHtml(appRole) {
     }
 
     function renderView() {
-      const dateVal = document.getElementById("dateFilter").value;
+      const dateVal = toYmd(document.getElementById("dateFilter").value);
       const docVal = document.getElementById("doctorFilter").value;
 
       const list = state.bookings.filter((b) => {
-        const matchDate = !dateVal || String(b.Visit_Date || "").slice(0, 10) === dateVal;
+        const matchDate = !dateVal || toYmd(b.Visit_Date) === dateVal;
         const matchDoc = docVal === "ALL" || String(b.Doctor_Name || "").trim() === docVal;
         return matchDate && matchDoc;
       });
@@ -1249,7 +1235,7 @@ function renderStandaloneAppHtml(appRole) {
                 <span class="badge \${cls}">\${st}</span>
               </div>
               <div class="q-meta">
-                👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | ⏰ \${b.Batch_Slot || ""}<br>
+                👨‍⚕️ <b>\${b.Doctor_Name || ""}</b> | 📅 \${toYmd(b.Visit_Date)} | ⏰ \${b.Batch_Slot || ""}<br>
                 📱 \${b.Patient_Phone || ""} | 💳 \${b.Payment_Status || "Paid"}\${feeLine}
               </div>
               <div class="q-actions">
@@ -1281,23 +1267,6 @@ app.get("/doctor-app", (req, res) => {
 
 app.get("/app", (req, res) => {
   res.redirect("/reception-app");
-});
-
-app.post("/send-reminders", async (req, res) => {
-  try {
-    if (CRON_SECRET) {
-      const auth = String(req.headers["x-cron-secret"] || req.query.secret || "").trim();
-      if (auth !== CRON_SECRET) {
-        return res.status(401).json({ ok: false, error: "Unauthorized" });
-      }
-    }
-    const visitDate = req.query.visitDate || req.body?.visitDate || "";
-    const result = await runScheduledReminders(visitDate);
-    return res.status(200).json(result);
-  } catch (err) {
-    console.error("Send Reminders Error:", err);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
 });
 
 // Meta WhatsApp Webhook Verification
@@ -1412,11 +1381,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 10000);
-const server = app.listen(PORT, "0.0.0.0", () => {
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
   console.log(`AR Enterprises OPD Engine running on ${PORT}`);
-});
-
-server.on("error", (err) => {
-  console.error("HTTP Server Error:", err.code || err.message);
 });
