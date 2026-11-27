@@ -1,4 +1,6 @@
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const TOKEN_PREFIX = "OPD_";
+const TOKEN_START_NUMBER = 101;
 
 function getIstNow() {
   return new Date(Date.now() + IST_OFFSET_MS);
@@ -104,7 +106,48 @@ function getClientSheetId(ctx) {
   ).trim();
 }
 
-async function sendButtonsMessage(ctx, { headerText, bodyText, footerText, buttons }) {
+function extractNextOpdToken(existingRows = []) {
+  let maxNum = TOKEN_START_NUMBER - 1;
+  for (const r of existingRows) {
+    const rawId = String(r?.Token_ID || r?.tokenId || "").trim();
+    const match = rawId.match(/^OPD_(\d+)$/i);
+    if (match) {
+      const n = Number(match[1]);
+      if (!Number.isNaN(n) && n > maxNum) {
+        maxNum = n;
+      }
+    }
+  }
+  const nextNum = Math.max(TOKEN_START_NUMBER, maxNum + 1);
+  return `${TOKEN_PREFIX}${nextNum}`;
+}
+
+async function generateNextOpdToken(ctx, spreadsheetId) {
+  try {
+    const res = await ctx.getSheet({
+      action: "get_live_status",
+      spreadsheetId,
+      spreadsheet_id: spreadsheetId,
+      tokenId: "",
+      phone: "",
+    });
+    const rows = Array.isArray(res?.bookings)
+      ? res.bookings
+      : Array.isArray(res?.allBookings)
+      ? res.allBookings
+      : Array.isArray(res?.data)
+      ? res.data
+      : [];
+    return extractNextOpdToken(rows);
+  } catch (_) {
+    return `${TOKEN_PREFIX}${TOKEN_START_NUMBER}`;
+  }
+}
+
+async function sendButtonsMessage(
+  ctx,
+  { headerText, bodyText, footerText, buttons }
+) {
   const safeButtons = (buttons || []).slice(0, 3).map((b, i) => ({
     type: "reply",
     reply: {
@@ -120,7 +163,10 @@ async function sendButtonsMessage(ctx, { headerText, bodyText, footerText, butto
       action: { buttons: safeButtons },
     };
     if (headerText) {
-      interactive.header = { type: "text", text: truncateText(headerText, 60) };
+      interactive.header = {
+        type: "text",
+        text: truncateText(headerText, 60),
+      };
     }
     if (footerText) {
       interactive.footer = { text: truncateText(footerText, 60) };
@@ -160,7 +206,10 @@ async function sendListMessage(
       },
     };
     if (headerText) {
-      interactive.header = { type: "text", text: truncateText(headerText, 60) };
+      interactive.header = {
+        type: "text",
+        text: truncateText(headerText, 60),
+      };
     }
     if (footerText) {
       interactive.footer = { text: truncateText(footerText, 60) };
@@ -210,7 +259,9 @@ async function loadDoctors(ctx) {
           ctx.business?.advanceAmount ??
           0
       ),
-      batches: parseBatches(d.batches || d.Batch_Slot || d.batchesRaw || d.timing),
+      batches: parseBatches(
+        d.batches || d.Batch_Slot || d.batchesRaw || d.timing
+      ),
       todayAvail: d.todayAvail ?? d.Today_Avail ?? "P",
       nextDayAvail: d.nextDayAvail ?? d.Next_Day_Avail ?? "P",
       plus2DayAvail: d.plus2DayAvail ?? d.Plus_2_Day_Avail ?? "P",
@@ -224,9 +275,9 @@ async function sendWelcomeAndLanguage(ctx) {
     `✨ *Warm Welcome to ${bizName} Digital OPD Care!* ✨\n\n` +
     `आपका स्वास्थ्य और समय हमारे लिए सबसे महत्वपूर्ण है। यहाँ से आप आसानी से:\n` +
     `• 👨‍⚕️ *डॉक्टर व उपलब्धता देख सकते हैं*\n` +
-    `• 🎫 *अपना OPD टोकन बुक व पेमेंट कर सकते हैं*\n` +
+    `• 💳 *पहले पेमेंट कर अपना OPD टोकन बुक कर सकते हैं*\n` +
     `• 📍 *अपना लाइव टोकन स्टेटस ट्रैक कर सकते हैं*\n\n` +
-    `Your health and time matter most to us. Check doctor availability, book & pay for your OPD token, and track live queue status effortlessly.\n\n` +
+    `Your health and time matter most to us. Check doctor availability, complete payment first to book your OPD token, and track live queue status effortlessly.\n\n` +
     `नीचे बटन दबाकर भाषा चुनें / Tap a button to select language:`;
 
   await sendButtonsMessage(ctx, {
@@ -245,11 +296,11 @@ async function sendMainMenu(ctx, lang = "hi") {
   const text =
     lang === "en"
       ? `🏥 *${bizName}*\nHow can we help you today?\n\n` +
-        `• *Book OPD* — Book consultation & get token\n` +
+        `• *Book OPD* — Select date, doctor & pay first\n` +
         `• *Track Token* — Check live queue & status\n` +
         `• *Doctor Avail* — View doctor schedule & availability`
       : `🏥 *${bizName}*\nआज हम आपकी क्या मदद कर सकते हैं?\n\n` +
-        `• *Book OPD* — परामर्श व टोकन बुक करें\n` +
+        `• *Book OPD* — तारीख व डॉक्टर चुनें और पेमेंट करें\n` +
         `• *Track Token* — लाइव कतार व स्टेटस देखें\n` +
         `• *Doctor Avail* — डॉक्टर शेड्यूल व उपलब्धता देखें`;
 
@@ -265,62 +316,88 @@ async function sendMainMenu(ctx, lang = "hi") {
   });
 }
 
-async function sendDoctorList(ctx, lang, doctors) {
-  if (!doctors.length) {
+async function sendDayList(ctx, lang) {
+  const days = getDayOptions(lang);
+  const bodyText =
+    lang === "en"
+      ? `📅 *Select Appointment Date First:*\n\n` +
+        days.map((d) => `${d.index}. *${d.display}*`).join("\n")
+      : `📅 *सबसे पहले अपॉइंटमेंट की तारीख चुनें:*\n\n` +
+        days.map((d) => `${d.index}. *${d.display}*`).join("\n");
+
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Select Date" : "तारीख चुनें",
+    bodyText,
+    buttons: days.map((d, i) => ({
+      id: `day_${i}`,
+      title: lang === "en" ? d.shortLabel : `${d.shortLabel} ${d.ymd.slice(5)}`,
+    })),
+  });
+}
+
+async function sendDoctorListForDay(ctx, lang, dayInfo, doctors) {
+  const availableDoctors = (doctors || []).filter((doc) =>
+    isDoctorAvailableOnDay(doc, dayInfo)
+  );
+
+  if (!availableDoctors.length) {
     await sendButtonsMessage(ctx, {
       bodyText:
         lang === "en"
-          ? "⚠️ No doctors are currently active in the clinic schedule."
-          : "⚠️ अभी क्लिनिक शेड्यूल में कोई डॉक्टर उपलब्ध नहीं है।",
+          ? `❌ No doctors are available on *${dayInfo.display}*. Please select another date.`
+          : `❌ *${dayInfo.display}* को कोई डॉक्टर उपलब्ध नहीं है। कृपया दूसरी तारीख चुनें।`,
       buttons: [
+        { id: "book_opd", title: lang === "en" ? "Change Date" : "तारीख बदलें" },
         {
           id: "back_menu",
           title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
         },
       ],
     });
-    return;
+    return { availableDoctors: [] };
   }
 
   const bodyText =
     lang === "en"
-      ? "👨‍⚕️ *Select a Doctor:*\n\n" +
-        doctors
+      ? `👨‍⚕️ *Select Doctor for ${dayInfo.display}:*\n\n` +
+        availableDoctors
           .map(
             (d, i) =>
-              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _${getDoctorAvailSummary(d, lang)}_`
+              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _Batches: ${d.batches.join(", ")}_`
           )
           .join("\n")
-      : "👨‍⚕️ *डॉक्टर चुनें:*\n\n" +
-        doctors
+      : `👨‍⚕️ *${dayInfo.display} के लिए डॉक्टर चुनें:*\n\n` +
+        availableDoctors
           .map(
             (d, i) =>
-              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _${getDoctorAvailSummary(d, lang)}_`
+              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _बैच: ${d.batches.join(", ")}_`
           )
           .join("\n");
 
-  if (doctors.length <= 3) {
+  if (availableDoctors.length <= 3) {
     await sendButtonsMessage(ctx, {
       headerText: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
       bodyText,
-      buttons: doctors.map((d, i) => ({
+      buttons: availableDoctors.map((d, i) => ({
         id: `doc_${i}`,
         title: `${d.name} ₹${d.opdFee}`,
       })),
     });
-    return;
+    return { availableDoctors };
   }
 
   await sendListMessage(ctx, {
     headerText: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
     bodyText,
     buttonLabel: lang === "en" ? "Choose Doctor" : "डॉक्टर चुनें",
-    rows: doctors.map((d, i) => ({
+    rows: availableDoctors.map((d, i) => ({
       id: `doc_${i}`,
       title: `${d.name} (₹${d.opdFee})`,
-      description: `${d.specialty} | ${getDoctorAvailSummary(d, lang)}`,
+      description: `${d.specialty} | ${dayInfo.shortLabel}`,
     })),
   });
+
+  return { availableDoctors };
 }
 
 async function sendDoctorAvailability(ctx, lang, doctors) {
@@ -375,37 +452,6 @@ async function sendDoctorAvailability(ctx, lang, doctors) {
   });
 }
 
-async function sendDayList(ctx, lang, doc) {
-  const days = getDayOptions(lang);
-  const bodyText =
-    lang === "en"
-      ? `📅 *${doc.name}* (${doc.specialty} — ₹${doc.opdFee})\nSelect appointment date:\n\n` +
-        days
-          .map((d) => {
-            const avail = isDoctorAvailableOnDay(doc, d);
-            const badge = avail ? "✅ Available" : "❌ Unavailable";
-            return `• *${d.display}* — ${badge}`;
-          })
-          .join("\n")
-      : `📅 *${doc.name}* (${doc.specialty} — ₹${doc.opdFee})\nअपॉइंटमेंट की तारीख चुनें:\n\n` +
-        days
-          .map((d) => {
-            const avail = isDoctorAvailableOnDay(doc, d);
-            const badge = avail ? "✅ उपलब्ध" : "❌ अनुपलब्ध";
-            return `• *${d.display}* — ${badge}`;
-          })
-          .join("\n");
-
-  await sendButtonsMessage(ctx, {
-    headerText: lang === "en" ? "Select Date" : "तारीख चुनें",
-    bodyText,
-    buttons: days.map((d, i) => ({
-      id: `day_${i}`,
-      title: lang === "en" ? d.shortLabel : `${d.shortLabel} ${d.ymd.slice(5)}`,
-    })),
-  });
-}
-
 async function sendBatchList(ctx, lang, doc, dayOpt, batches) {
   const bodyText =
     lang === "en"
@@ -451,13 +497,13 @@ async function sendMobilePrompt(ctx, lang) {
   });
 }
 
-async function finalizeBooking(ctx, lang, sessionData) {
-  const tokenId = `OPD-${Date.now().toString().slice(-6)}`;
+async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
   const doc = sessionData.selectedDoctor || {};
   const opdFee = Number(doc.opdFee || 0);
   const rawAdvance = Number(
     doc.advanceAmount ?? ctx.business?.advanceAmount ?? 0
   );
+  const payableAmount = rawAdvance > 0 ? rawAdvance : opdFee;
 
   const cashfreeAppId = String(
     ctx.business?.cashfreeAppId || ctx.business?.Cashfree_App_ID || ""
@@ -465,9 +511,6 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const cashfreeSecretKey = String(
     ctx.business?.cashfreeSecretKey || ctx.business?.Cashfree_Secret_Key || ""
   ).trim();
-  const hasClientGateway = Boolean(cashfreeAppId && cashfreeSecretKey);
-
-  const advanceFee = hasClientGateway && rawAdvance > 0 ? rawAdvance : 0;
 
   const patientName = sessionData.patientName;
   const patientAge = sessionData.patientAge;
@@ -476,16 +519,16 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const dayLabel = sessionData.dayInfo?.shortLabel || "";
   const batchSlot = sessionData.batchSlot;
   const bizName = ctx.business?.name || "City Care OPD";
-  const spreadsheetId = getClientSheetId(ctx);
+  const pendingRef = `PAY-${Date.now().toString().slice(-6)}`;
 
   let payLink = null;
-  if (advanceFee > 0) {
+  if (payableAmount > 0) {
     const linkPayload = {
-      amountInRupees: advanceFee,
-      tokenId,
+      amountInRupees: payableAmount,
+      tokenId: pendingRef,
       patientName,
       phone: patientPhone,
-      description: `${bizName} - Advance for ${patientName} (${tokenId})`,
+      description: `${bizName} - ${patientName} (${visitDate})`,
       cashfreeAppId,
       cashfreeSecretKey,
     };
@@ -498,6 +541,94 @@ async function finalizeBooking(ctx, lang, sessionData) {
       payLink = await ctx.createRazorpayLink(linkPayload);
     }
   }
+
+  const paymentUrl =
+    payLink?.shortUrl ||
+    payLink?.short_url ||
+    payLink?.link_url ||
+    payLink?.linkUrl ||
+    payLink?.payment_link ||
+    payLink?.url ||
+    "";
+
+  const paymentOrderId =
+    payLink?.id || payLink?.link_id || payLink?.order_id || pendingRef;
+
+  const pendingPayload = {
+    ...sessionData,
+    opdFee,
+    payableAmount,
+    paymentOrderId,
+    paymentUrl,
+  };
+
+  ctx.setSession({
+    lang,
+    step: "WAIT_PAYMENT",
+    data: pendingPayload,
+  });
+
+  const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
+
+  let msg =
+    lang === "en"
+      ? `💳 *Payment Required Before Token Issue*\n\n` +
+        `• Patient: *${patientName}* (${patientAge} yrs)\n` +
+        `• Mobile: *${patientPhone}*\n` +
+        `• Date: *${dayText}*\n` +
+        `• Doctor: *${doc.name}*\n` +
+        `• Time Slot: *${batchSlot}*\n` +
+        `• Amount to Pay: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n\n`
+      : `💳 *टोकन जारी होने से पहले पेमेंट आवश्यक है*\n\n` +
+        `• मरीज़: *${patientName}* (${patientAge} वर्ष)\n` +
+        `• मोबाइल: *${patientPhone}*\n` +
+        `• तारीख: *${dayText}*\n` +
+        `• डॉक्टर: *${doc.name}*\n` +
+        `• समय स्लॉट: *${batchSlot}*\n` +
+        `• देय राशि: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n\n`;
+
+  if (paymentUrl) {
+    msg +=
+      lang === "en"
+        ? `🔗 *Cashfree Payment Link:*\n${paymentUrl}\n\n` +
+          `_Complete the payment first, then tap *Paid - Get Token* below._`
+        : `🔗 *Cashfree पेमेंट लिंक:*\n${paymentUrl}\n\n` +
+          `_पहले पेमेंट पूरा करें, फिर नीचे *Paid - Get Token* बटन दबाएं।_`;
+  } else {
+    msg +=
+      lang === "en"
+        ? `⚠️ Cashfree link could not be generated automatically. Please verify gateway credentials or tap *Paid - Get Token* after payment.`
+        : `⚠️ Cashfree लिंक अपने आप नहीं बन सका। पेमेंट सेटिंग जांचें या पेमेंट के बाद *Paid - Get Token* दबाएं।`;
+  }
+
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Complete Payment" : "पेमेंट करें",
+    bodyText: msg,
+    buttons: [
+      { id: "confirm_paid_token", title: "Paid - Get Token" },
+      {
+        id: "back_menu",
+        title: lang === "en" ? "Cancel / Menu" : "रद्द करें / मेनू",
+      },
+    ],
+  });
+}
+
+async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
+  const spreadsheetId = getClientSheetId(ctx);
+  const tokenId = await generateNextOpdToken(ctx, spreadsheetId);
+
+  const doc = pendingData.selectedDoctor || {};
+  const opdFee = Number(doc.opdFee ?? pendingData.opdFee ?? 0);
+  const payableAmount = Number(pendingData.payableAmount ?? opdFee);
+  const patientName = pendingData.patientName;
+  const patientAge = pendingData.patientAge;
+  const patientPhone = pendingData.patientPhone;
+  const visitDate = String(pendingData.visitDate || "").slice(0, 10);
+  const dayLabel = pendingData.dayInfo?.shortLabel || "";
+  const batchSlot = pendingData.batchSlot;
+  const bizName = ctx.business?.name || "City Care OPD";
+  const paymentOrderId = pendingData.paymentOrderId || "";
 
   await ctx.postSheet({
     action: "create_booking",
@@ -512,67 +643,45 @@ async function finalizeBooking(ctx, lang, sessionData) {
     visitDate,
     batchSlot,
     opdFee,
-    advanceFee,
-    paidAmount: 0,
+    advanceFee: payableAmount,
+    paidAmount: payableAmount,
     queueStatus: "Waiting",
-    paymentStatus: advanceFee > 0 ? "Pending Advance" : "Pay at Counter",
+    paymentStatus: "Paid",
     greetingSent: "Yes",
-    paymentLinkId: payLink?.id || payLink?.link_id || "",
+    paymentLinkId: paymentOrderId,
+    paymentRefId: paymentOrderId,
   });
 
   ctx.clearSession(true);
 
   const greetingText =
     lang === "en"
-      ? `🙏 Welcome to *${bizName}*! Wishing you good health.`
-      : `🙏 *${bizName}* में आपका स्वागत है! आपके उत्तम स्वास्थ्य की कामना करते हैं।`;
+      ? `🙏 Welcome to *${bizName}*! Payment received & your token is confirmed.`
+      : `🙏 *${bizName}* में आपका स्वागत है! पेमेंट प्राप्त हो गया है और आपका टोकन कन्फ़र्म है।`;
 
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
-  const paymentUrl =
-    payLink?.shortUrl ||
-    payLink?.short_url ||
-    payLink?.link_url ||
-    payLink?.linkUrl ||
-    payLink?.payment_link ||
-    payLink?.url ||
-    "";
 
-  let msg =
+  const msg =
     `${greetingText}\n\n` +
     (lang === "en"
-      ? `🎫 *OPD Token Issued*\n` +
-        `• Token ID: *${tokenId}*\n` +
+      ? `🎫 *OPD Token Confirmed*\n` +
+        `• Token No.: *${tokenId}*\n` +
         `• Patient: *${patientName}* (${patientAge} yrs)\n` +
         `• Mobile: *${patientPhone}*\n` +
-        `• Doctor: *${doc.name}*\n` +
         `• Date: *${dayText}*\n` +
+        `• Doctor: *${doc.name}*\n` +
         `• Time Slot: *${batchSlot}*\n` +
-        `• OPD Fee: ₹${opdFee} | Advance: ₹${advanceFee}`
-      : `🎫 *OPD टोकन जारी*\n` +
-        `• टोकन ID: *${tokenId}*\n` +
+        `• Paid Amount: *₹${payableAmount}* (OPD Fee: ₹${opdFee})\n` +
+        `• Payment Status: *Paid*`
+      : `🎫 *OPD टोकन कन्फ़र्म*\n` +
+        `• टोकन नंबर: *${tokenId}*\n` +
         `• मरीज़: *${patientName}* (${patientAge} वर्ष)\n` +
         `• मोबाइल: *${patientPhone}*\n` +
-        `• डॉक्टर: *${doc.name}*\n` +
         `• तारीख: *${dayText}*\n` +
+        `• डॉक्टर: *${doc.name}*\n` +
         `• समय स्लॉट: *${batchSlot}*\n` +
-        `• OPD फ़ीस: ₹${opdFee} | एडवांस: ₹${advanceFee}`);
-
-  if (paymentUrl) {
-    msg +=
-      lang === "en"
-        ? `\n\n💳 *Complete Advance Payment Here:*\n${paymentUrl}\n\n_Once paid, your token status will update automatically._`
-        : `\n\n💳 *एडवांस पेमेंट लिंक:*\n${paymentUrl}\n\n_पेमेंट के बाद आपका टोकन स्टेटस अपडेट हो जाएगा।_`;
-  } else if (advanceFee > 0) {
-    msg +=
-      lang === "en"
-        ? `\n\n⚠️ Advance ₹${advanceFee} could not generate online link; you can pay ₹${opdFee} at the clinic counter.`
-        : `\n\n⚠️ ऑनलाइन एडवांस लिंक नहीं बन सका; आप क्लिनिक काउंटर पर ₹${opdFee} भुगतान कर सकते हैं।`;
-  } else {
-    msg +=
-      lang === "en"
-        ? `\n\n🏥 *Pay ₹${opdFee} at the clinic counter.*`
-        : `\n\n🏥 *क्लिनिक काउंटर पर ₹${opdFee} भुगतान करें।*`;
-  }
+        `• भुगतान राशि: *₹${payableAmount}* (OPD फ़ीस: ₹${opdFee})\n` +
+        `• पेमेंट स्टेटस: *Paid*`);
 
   await sendButtonsMessage(ctx, {
     headerText: lang === "en" ? "Token Confirmed" : "टोकन कन्फ़र्म",
@@ -633,7 +742,7 @@ async function handleLiveQueue(ctx, lang, queryText) {
     const vDate = String(r.Visit_Date || r.visitDate || "").slice(0, 10) || "-";
     const bSlot = r.Batch_Slot || r.batchSlot || "-";
     const qSt = r.Queue_Status || r.queueStatus || "Waiting";
-    const paySt = r.Payment_Status || r.paymentStatus || "Pay at Counter";
+    const paySt = r.Payment_Status || r.paymentStatus || "Paid";
     out +=
       `• *${tId}* — ${pName}\n` +
       `  Dr: *${dName}* | ${vDate} (${bSlot})\n` +
@@ -710,9 +819,44 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
     lang = isEnglish ? "en" : "hi";
     ctx.setSession({ lang, step: null, data: {} });
     await ctx.sendText(
-      lang === "en" ? "✅ Language set to *English*." : "✅ भाषा *हिंदी* चुनी गई है।"
+      lang === "en"
+        ? "✅ Language set to *English*."
+        : "✅ भाषा *हिंदी* चुनी गई है।"
     );
     await sendMainMenu(ctx, lang);
+    return;
+  }
+
+  if (step === "WAIT_PAYMENT") {
+    const paidConfirmed =
+      id === "confirm_paid_token" ||
+      ["paid", "done", "payment done", "pay done", "ho gaya", "हो गया"].includes(
+        text.toLowerCase()
+      );
+
+    if (paidConfirmed) {
+      await issueConfirmedTokenAfterPayment(ctx, lang, data);
+      return;
+    }
+
+    const payUrlText = data.paymentUrl
+      ? `\n🔗 ${data.paymentUrl}\n\n`
+      : "\n\n";
+
+    await sendButtonsMessage(ctx, {
+      headerText: lang === "en" ? "Payment Pending" : "पेमेंट बाकी है",
+      bodyText:
+        lang === "en"
+          ? `⏳ Token *OPD_101+* is issued only after payment.${payUrlText}Tap *Paid - Get Token* once your payment is done.`
+          : `⏳ पेमेंट पूरा होने के बाद ही *OPD_101+* टोकन जारी होगा।${payUrlText}पेमेंट होने के बाद *Paid - Get Token* बटन दबाएं।`,
+      buttons: [
+        { id: "confirm_paid_token", title: "Paid - Get Token" },
+        {
+          id: "back_menu",
+          title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+        },
+      ],
+    });
     return;
   }
 
@@ -725,13 +869,12 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
 
   if (!step) {
     if (id === "book_opd") {
-      const doctors = await loadDoctors(ctx);
       ctx.setSession({
         lang,
-        step: "SELECT_DOCTOR",
-        data: { doctors },
+        step: "SELECT_DAY",
+        data: {},
       });
-      await sendDoctorList(ctx, lang, doctors);
+      await sendDayList(ctx, lang);
       return;
     }
 
@@ -741,8 +884,8 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
         headerText: lang === "en" ? "Track Token" : "टोकन ट्रैक करें",
         bodyText:
           lang === "en"
-            ? "🔍 Tap *My Tokens* below or enter your *Token ID* (e.g. OPD-123456):"
-            : "🔍 नीचे *My Tokens* दबाएं या अपनी *टोकन ID* (जैसे OPD-123456) लिखें:",
+            ? "🔍 Tap *My Tokens* below or enter your *Token ID* (e.g. OPD_101):"
+            : "🔍 नीचे *My Tokens* दबाएं या अपनी *टोकन ID* (जैसे OPD_101) लिखें:",
         buttons: [{ id: "track_all", title: "My Tokens" }],
       });
       return;
@@ -764,36 +907,8 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
     return;
   }
 
-  if (step === "SELECT_DOCTOR") {
-    const doctors = Array.isArray(data.doctors)
-      ? data.doctors
-      : await loadDoctors(ctx);
-
-    let idx = -1;
-    if (id.startsWith("doc_")) {
-      idx = Number(id.replace("doc_", ""));
-    } else if (/^\d+$/.test(text)) {
-      idx = Number(text) - 1;
-    }
-
-    if (Number.isNaN(idx) || idx < 0 || idx >= doctors.length) {
-      await sendDoctorList(ctx, lang, doctors);
-      return;
-    }
-
-    const selectedDoctor = doctors[idx];
-    ctx.setSession({
-      lang,
-      step: "SELECT_DAY",
-      data: { ...data, doctors, selectedDoctor },
-    });
-    await sendDayList(ctx, lang, selectedDoctor);
-    return;
-  }
-
   if (step === "SELECT_DAY") {
     const days = getDayOptions(lang);
-    const doc = data.selectedDoctor;
 
     let idx = -1;
     if (id.startsWith("day_")) {
@@ -803,33 +918,65 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
     }
 
     if (Number.isNaN(idx) || idx < 0 || idx >= days.length) {
-      await sendDayList(ctx, lang, doc);
+      await sendDayList(ctx, lang);
       return;
     }
 
     const dayInfo = days[idx];
-    if (!isDoctorAvailableOnDay(doc, dayInfo)) {
-      await ctx.sendText(
-        lang === "en"
-          ? `❌ *${doc.name}* is not available on *${dayInfo.display}*. Please select another day.`
-          : `❌ *${doc.name}* *${dayInfo.display}* को उपलब्ध नहीं हैं। कृपया कोई अन्य दिन चुनें।`
-      );
-      await sendDayList(ctx, lang, doc);
+    const allDoctors = await loadDoctors(ctx);
+    const availableDoctors = allDoctors.filter((doc) =>
+      isDoctorAvailableOnDay(doc, dayInfo)
+    );
+
+    if (!availableDoctors.length) {
+      await sendDoctorListForDay(ctx, lang, dayInfo, allDoctors);
       return;
     }
 
-    const batches = doc.batches || [];
+    ctx.setSession({
+      lang,
+      step: "SELECT_DOCTOR",
+      data: {
+        ...data,
+        dayInfo,
+        visitDate: dayInfo.ymd,
+        doctors: availableDoctors,
+      },
+    });
+
+    await sendDoctorListForDay(ctx, lang, dayInfo, availableDoctors);
+    return;
+  }
+
+  if (step === "SELECT_DOCTOR") {
+    const doctors = Array.isArray(data.doctors) ? data.doctors : [];
+    const dayInfo = data.dayInfo;
+
+    let idx = -1;
+    if (id.startsWith("doc_")) {
+      idx = Number(id.replace("doc_", ""));
+    } else if (/^\d+$/.test(text)) {
+      idx = Number(text) - 1;
+    }
+
+    if (Number.isNaN(idx) || idx < 0 || idx >= doctors.length) {
+      await sendDoctorListForDay(ctx, lang, dayInfo, doctors);
+      return;
+    }
+
+    const selectedDoctor = doctors[idx];
+    const batches = selectedDoctor.batches || [];
+
     ctx.setSession({
       lang,
       step: "SELECT_BATCH",
       data: {
         ...data,
-        dayInfo,
-        visitDate: dayInfo.ymd,
+        selectedDoctor,
         batches,
       },
     });
-    await sendBatchList(ctx, lang, doc, dayInfo, batches);
+    await sendBatchList(ctx, lang, selectedDoctor, dayInfo, batches);
     return;
   }
 
@@ -916,7 +1063,7 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       return;
     }
 
-    await finalizeBooking(ctx, lang, {
+    await initiatePaymentBeforeToken(ctx, lang, {
       ...data,
       patientPhone: digits,
     });
