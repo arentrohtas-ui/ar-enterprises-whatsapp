@@ -11,12 +11,23 @@ function formatDateYmd(dateObj) {
   return `${y}-${m}-${d}`;
 }
 
+function truncateText(str, maxLen) {
+  const s = String(str || "").trim();
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
+}
+
 function getDayOptions(lang = "hi") {
   const nowIst = getIstNow();
   const labels = [
     { key: "today", hi: "आज", en: "Today", col: "Today_Avail" },
     { key: "next", hi: "कल", en: "Tomorrow", col: "Next_Day_Avail" },
-    { key: "plus2", hi: "परसों", en: "Day After Tomorrow", col: "Plus_2_Day_Avail" },
+    {
+      key: "plus2",
+      hi: "परसों",
+      en: "Day After Tomorrow",
+      col: "Plus_2_Day_Avail",
+    },
   ];
 
   return labels.map((item, idx) => {
@@ -93,6 +104,74 @@ function getClientSheetId(ctx) {
   ).trim();
 }
 
+async function sendButtonsMessage(ctx, { headerText, bodyText, footerText, buttons }) {
+  const safeButtons = (buttons || []).slice(0, 3).map((b, i) => ({
+    type: "reply",
+    reply: {
+      id: truncateText(b.id || `btn_${i + 1}`, 256),
+      title: truncateText(b.title, 20),
+    },
+  }));
+
+  if (typeof ctx.sendWA === "function" && safeButtons.length > 0) {
+    const interactive = {
+      type: "button",
+      body: { text: truncateText(bodyText, 1024) },
+      action: { buttons: safeButtons },
+    };
+    if (headerText) {
+      interactive.header = { type: "text", text: truncateText(headerText, 60) };
+    }
+    if (footerText) {
+      interactive.footer = { text: truncateText(footerText, 60) };
+    }
+    await ctx.sendWA({
+      type: "interactive",
+      interactive,
+    });
+    return;
+  }
+
+  await ctx.sendText(bodyText);
+}
+
+async function sendListMessage(ctx, { headerText, bodyText, footerText, buttonLabel, rows }) {
+  const safeRows = (rows || []).slice(0, 10).map((r, i) => ({
+    id: truncateText(r.id || `row_${i + 1}`, 200),
+    title: truncateText(r.title, 24),
+    description: r.description ? truncateText(r.description, 72) : undefined,
+  }));
+
+  if (typeof ctx.sendWA === "function" && safeRows.length > 0) {
+    const interactive = {
+      type: "list",
+      body: { text: truncateText(bodyText, 1024) },
+      action: {
+        button: truncateText(buttonLabel || "Select", 20),
+        sections: [
+          {
+            title: truncateText(headerText || "Options", 24),
+            rows: safeRows,
+          },
+        ],
+      },
+    };
+    if (headerText) {
+      interactive.header = { type: "text", text: truncateText(headerText, 60) };
+    }
+    if (footerText) {
+      interactive.footer = { text: truncateText(footerText, 60) };
+    }
+    await ctx.sendWA({
+      type: "interactive",
+      interactive,
+    });
+    return;
+  }
+
+  await ctx.sendText(bodyText);
+}
+
 async function loadDoctors(ctx) {
   const spreadsheetId = getClientSheetId(ctx);
   const res = await ctx.getSheet({
@@ -114,11 +193,19 @@ async function loadDoctors(ctx) {
     })
     .map((d, idx) => ({
       id: String(d.id || d.Doctor_ID || d.doctorId || `DOC_${idx + 1}`).trim(),
-      name: String(d.name || d.Doctor_Name || d.doctorName || `Doctor ${idx + 1}`).trim(),
-      specialty: String(d.specialty || d.Specialization || d.dept || "General OPD").trim(),
+      name: String(
+        d.name || d.Doctor_Name || d.doctorName || `Doctor ${idx + 1}`
+      ).trim(),
+      specialty: String(
+        d.specialty || d.Specialization || d.dept || "General OPD"
+      ).trim(),
       opdFee: Number(d.opdFee ?? d.OPD_Fee ?? d.fee ?? 0),
       advanceAmount: Number(
-        d.advanceAmount ?? d.Advance_Amount ?? d.advance ?? ctx.business?.advanceAmount ?? 0
+        d.advanceAmount ??
+          d.Advance_Amount ??
+          d.advance ??
+          ctx.business?.advanceAmount ??
+          0
       ),
       batches: parseBatches(d.batches || d.Batch_Slot || d.batchesRaw || d.timing),
       todayAvail: d.todayAvail ?? d.Today_Avail ?? "P",
@@ -137,104 +224,116 @@ async function sendWelcomeAndLanguage(ctx) {
     `• 🎫 *अपना OPD टोकन बुक व पेमेंट कर सकते हैं*\n` +
     `• 📍 *अपना लाइव टोकन स्टेटस ट्रैक कर सकते हैं*\n\n` +
     `Your health and time matter most to us. Check doctor availability, book & pay for your OPD token, and track live queue status effortlessly.\n\n` +
-    `नीचे बटन दबाकर अपनी भाषा चुनें:\n` +
-    `Tap a button below to choose your language:`;
+    `नीचे बटन दबाकर भाषा चुनें / Tap a button to select language:`;
 
-  if (typeof ctx.sendWA === "function") {
-    await ctx.sendWA({
-      type: "interactive",
-      interactive: {
-        type: "button",
-        header: {
-          type: "text",
-          text: bizName,
-        },
-        body: {
-          text: bodyText,
-        },
-        footer: {
-          text: "AR Enterprises OPD Automation",
-        },
-        action: {
-          buttons: [
-            {
-              type: "reply",
-              reply: {
-                id: "lang_hi",
-                title: "हिंदी",
-              },
-            },
-            {
-              type: "reply",
-              reply: {
-                id: "lang_en",
-                title: "English",
-              },
-            },
-          ],
-        },
-      },
-    });
-    return;
-  }
-
-  await ctx.sendText(
-    `${bodyText}\n\n👉 *हिंदी* या *English* लिखकर भेजें।`
-  );
+  await sendButtonsMessage(ctx, {
+    headerText: bizName,
+    bodyText,
+    footerText: "AR Enterprises OPD Automation",
+    buttons: [
+      { id: "lang_hi", title: "हिंदी" },
+      { id: "lang_en", title: "English" },
+    ],
+  });
 }
 
 async function sendMainMenu(ctx, lang = "hi") {
-  const bizName = ctx.business?.name || "OPD Clinic";
+  const bizName = ctx.business?.name || "City Care OPD";
   const text =
     lang === "en"
       ? `🏥 *${bizName}*\nHow can we help you today?\n\n` +
-        `1️⃣ *Book OPD Token*\n` +
-        `2️⃣ *Track Token / Live Queue*\n` +
-        `3️⃣ *Doctor Availability*\n` +
-        `4️⃣ *Change Language*`
+        `• *Book OPD* — Book consultation & get token\n` +
+        `• *Track Token* — Check live queue & status\n` +
+        `• *Doctor Avail* — View doctor schedule & availability`
       : `🏥 *${bizName}*\nआज हम आपकी क्या मदद कर सकते हैं?\n\n` +
-        `1️⃣ *OPD टोकन बुक करें*\n` +
-        `2️⃣ *टोकन ट्रैक करें / लाइव कतार*\n` +
-        `3️⃣ *डॉक्टर उपलब्धता देखें*\n` +
-        `4️⃣ *भाषा बदलें*`;
+        `• *Book OPD* — परामर्श व टोकन बुक करें\n` +
+        `• *Track Token* — लाइव कतार व स्टेटस देखें\n` +
+        `• *Doctor Avail* — डॉक्टर शेड्यूल व उपलब्धता देखें`;
 
-  await ctx.sendText(text);
+  await sendButtonsMessage(ctx, {
+    headerText: bizName,
+    bodyText: text,
+    footerText: "AR Enterprises OPD Automation",
+    buttons: [
+      { id: "book_opd", title: "Book OPD" },
+      { id: "live_queue", title: "Track Token" },
+      { id: "doctor_avail", title: "Doctor Avail" },
+    ],
+  });
 }
 
 async function sendDoctorList(ctx, lang, doctors) {
   if (!doctors.length) {
-    await ctx.sendText(
-      lang === "en"
-        ? "⚠️ No doctors are currently active in the clinic schedule."
-        : "⚠️ अभी क्लिनिक शेड्यूल में कोई डॉक्टर उपलब्ध नहीं है।"
-    );
+    await sendButtonsMessage(ctx, {
+      bodyText:
+        lang === "en"
+          ? "⚠️ No doctors are currently active in the clinic schedule."
+          : "⚠️ अभी क्लिनिक शेड्यूल में कोई डॉक्टर उपलब्ध नहीं है।",
+      buttons: [
+        {
+          id: "back_menu",
+          title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+        },
+      ],
+    });
     return;
   }
 
-  let msg =
+  const bodyText =
     lang === "en"
-      ? "👨‍⚕️ *Select a Doctor (Reply with number):*\n\n"
-      : "👨‍⚕️ *डॉक्टर चुनें (नंबर लिखकर भेजें):*\n\n";
+      ? "👨‍⚕️ *Select a Doctor:*\n\n" +
+        doctors
+          .map(
+            (d, i) =>
+              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _${getDoctorAvailSummary(d, lang)}_`
+          )
+          .join("\n")
+      : "👨‍⚕️ *डॉक्टर चुनें:*\n\n" +
+        doctors
+          .map(
+            (d, i) =>
+              `${i + 1}. *${d.name}* (${d.specialty}) — ₹${d.opdFee}\n   _${getDoctorAvailSummary(d, lang)}_`
+          )
+          .join("\n");
 
-  doctors.forEach((doc, i) => {
-    const availLine = getDoctorAvailSummary(doc, lang);
-    msg +=
-      lang === "en"
-        ? `${i + 1}. *${doc.name}* (${doc.specialty}) — Fee: ₹${doc.opdFee}\n   _${availLine}_\n`
-        : `${i + 1}. *${doc.name}* (${doc.specialty}) — फ़ीस: ₹${doc.opdFee}\n   _${availLine}_\n`;
+  if (doctors.length <= 3) {
+    await sendButtonsMessage(ctx, {
+      headerText: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
+      bodyText,
+      buttons: doctors.map((d, i) => ({
+        id: `doc_${i}`,
+        title: `${d.name} ₹${d.opdFee}`,
+      })),
+    });
+    return;
+  }
+
+  await sendListMessage(ctx, {
+    headerText: lang === "en" ? "Select Doctor" : "डॉक्टर चुनें",
+    bodyText,
+    buttonLabel: lang === "en" ? "Choose Doctor" : "डॉक्टर चुनें",
+    rows: doctors.map((d, i) => ({
+      id: `doc_${i}`,
+      title: `${d.name} (₹${d.opdFee})`,
+      description: `${d.specialty} | ${getDoctorAvailSummary(d, lang)}`,
+    })),
   });
-
-  msg += lang === "en" ? "\nReply *0* for Main Menu." : "\nमुख्य मेनू के लिए *0* लिखें।";
-  await ctx.sendText(msg);
 }
 
 async function sendDoctorAvailability(ctx, lang, doctors) {
   if (!doctors.length) {
-    await ctx.sendText(
-      lang === "en"
-        ? "⚠️ No active doctors found right now."
-        : "⚠️ अभी कोई सक्रिय डॉक्टर उपलब्ध नहीं है।"
-    );
+    await sendButtonsMessage(ctx, {
+      bodyText:
+        lang === "en"
+          ? "⚠️ No active doctors found right now."
+          : "⚠️ अभी कोई सक्रिय डॉक्टर उपलब्ध नहीं है।",
+      buttons: [
+        {
+          id: "back_menu",
+          title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+        },
+      ],
+    });
     return;
   }
 
@@ -260,48 +359,93 @@ async function sendDoctorAvailability(ctx, lang, doctors) {
     msg += `   • Batches: ${doc.batches.join(", ")}\n\n`;
   });
 
-  msg +=
-    lang === "en"
-      ? "Reply *1* to Book Token or *0* for Main Menu."
-      : "टोकन बुक करने के लिए *1* या मुख्य मेनू के लिए *0* लिखें।";
-  await ctx.sendText(msg);
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Doctor Availability" : "डॉक्टर उपलब्धता",
+    bodyText: msg.trim(),
+    buttons: [
+      { id: "book_opd", title: "Book OPD" },
+      {
+        id: "back_menu",
+        title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+      },
+    ],
+  });
 }
 
 async function sendDayList(ctx, lang, doc) {
   const days = getDayOptions(lang);
-  let msg =
+  const bodyText =
     lang === "en"
-      ? `📅 *${doc.name}* — Select Date:\n\n`
-      : `📅 *${doc.name}* — तारीख चुनें:\n\n`;
+      ? `📅 *${doc.name}* (${doc.specialty} — ₹${doc.opdFee})\nSelect appointment date:\n\n` +
+        days
+          .map((d) => {
+            const avail = isDoctorAvailableOnDay(doc, d);
+            const badge = avail ? "✅ Available" : "❌ Unavailable";
+            return `• *${d.display}* — ${badge}`;
+          })
+          .join("\n")
+      : `📅 *${doc.name}* (${doc.specialty} — ₹${doc.opdFee})\nअपॉइंटमेंट की तारीख चुनें:\n\n` +
+        days
+          .map((d) => {
+            const avail = isDoctorAvailableOnDay(doc, d);
+            const badge = avail ? "✅ उपलब्ध" : "❌ अनुपलब्ध";
+            return `• *${d.display}* — ${badge}`;
+          })
+          .join("\n");
 
-  days.forEach((d) => {
-    const avail = isDoctorAvailableOnDay(doc, d);
-    const statusBadge = avail
-      ? lang === "en"
-        ? "✅ Available"
-        : "✅ उपलब्ध"
-      : lang === "en"
-      ? "❌ Unavailable"
-      : "❌ अनुपलब्ध";
-    msg += `${d.index}. *${d.display}* — ${statusBadge}\n`;
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Select Date" : "तारीख चुनें",
+    bodyText,
+    buttons: days.map((d, i) => ({
+      id: `day_${i}`,
+      title: lang === "en" ? d.shortLabel : `${d.shortLabel} ${d.ymd.slice(5)}`,
+    })),
   });
-
-  msg += lang === "en" ? "\nReply *0* for Main Menu." : "\nमुख्य मेनू के लिए *0* लिखें।";
-  await ctx.sendText(msg);
 }
 
 async function sendBatchList(ctx, lang, doc, dayOpt, batches) {
-  let msg =
+  const bodyText =
     lang === "en"
-      ? `⏰ *${doc.name}* (${dayOpt.display})\nSelect Time Slot:\n\n`
-      : `⏰ *${doc.name}* (${dayOpt.display})\nसमय स्लॉट चुनें:\n\n`;
+      ? `⏰ *${doc.name}* — *${dayOpt.display}*\nSelect time slot:\n\n` +
+        batches.map((b, i) => `${i + 1}. ${b}`).join("\n")
+      : `⏰ *${doc.name}* — *${dayOpt.display}*\nसमय स्लॉट चुनें:\n\n` +
+        batches.map((b, i) => `${i + 1}. ${b}`).join("\n");
 
-  batches.forEach((b, i) => {
-    msg += `${i + 1}. ${b}\n`;
+  if (batches.length <= 3) {
+    await sendButtonsMessage(ctx, {
+      headerText: lang === "en" ? "Select Time Slot" : "समय स्लॉट चुनें",
+      bodyText,
+      buttons: batches.map((b, i) => ({
+        id: `batch_${i}`,
+        title: b,
+      })),
+    });
+    return;
+  }
+
+  await sendListMessage(ctx, {
+    headerText: lang === "en" ? "Select Time Slot" : "समय स्लॉट चुनें",
+    bodyText,
+    buttonLabel: lang === "en" ? "Choose Slot" : "स्लॉट चुनें",
+    rows: batches.map((b, i) => ({
+      id: `batch_${i}`,
+      title: b,
+      description: `${doc.name} | ${dayOpt.display}`,
+    })),
   });
+}
 
-  msg += lang === "en" ? "\nReply *0* for Main Menu." : "\nमुख्य मेनू के लिए *0* लिखें।";
-  await ctx.sendText(msg);
+async function sendMobilePrompt(ctx, lang) {
+  const bodyText =
+    lang === "en"
+      ? "📱 Tap *Use WhatsApp No.* below or type your *10-digit Mobile Number*:"
+      : "📱 नीचे *Use WhatsApp No.* बटन दबाएं या अपना *10 अंकों का मोबाइल नंबर* लिखें:";
+
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Patient Mobile" : "मरीज़ का मोबाइल",
+    bodyText,
+    buttons: [{ id: "use_same_phone", title: "Use WhatsApp No." }],
+  });
 }
 
 async function finalizeBooking(ctx, lang, sessionData) {
@@ -328,7 +472,7 @@ async function finalizeBooking(ctx, lang, sessionData) {
   const visitDate = String(sessionData.visitDate || "").slice(0, 10);
   const dayLabel = sessionData.dayInfo?.shortLabel || "";
   const batchSlot = sessionData.batchSlot;
-  const bizName = ctx.business?.name || "OPD Clinic";
+  const bizName = ctx.business?.name || "City Care OPD";
   const spreadsheetId = getClientSheetId(ctx);
 
   let payLink = null;
@@ -427,12 +571,18 @@ async function finalizeBooking(ctx, lang, sessionData) {
         : `\n\n🏥 *क्लिनिक काउंटर पर ₹${opdFee} भुगतान करें।*`;
   }
 
-  msg +=
-    lang === "en"
-      ? `\n\nReply *2* anytime to track your token.`
-      : `\n\nअपना टोकन ट्रैक करने के लिए कभी भी *2* भेजें।`;
-
-  await ctx.sendText(msg);
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Token Confirmed" : "टोकन कन्फ़र्म",
+    bodyText: msg,
+    buttons: [
+      { id: "live_queue", title: "Track Token" },
+      { id: "book_opd", title: "Book OPD" },
+      {
+        id: "back_menu",
+        title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+      },
+    ],
+  });
 }
 
 async function handleLiveQueue(ctx, lang, queryText) {
@@ -453,11 +603,18 @@ async function handleLiveQueue(ctx, lang, queryText) {
     : [];
 
   if (!rows.length) {
-    await ctx.sendText(
-      lang === "en"
-        ? "ℹ️ No token found for this Token ID / mobile number."
-        : "ℹ️ इस टोकन ID या मोबाइल नंबर के लिए कोई टोकन नहीं मिला।"
-    );
+    await sendButtonsMessage(ctx, {
+      bodyText:
+        lang === "en"
+          ? "ℹ️ No token found for this Token ID / mobile number."
+          : "ℹ️ इस टोकन ID या मोबाइल नंबर के लिए कोई टोकन नहीं मिला।",
+      buttons: [
+        {
+          id: "back_menu",
+          title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+        },
+      ],
+    });
     return;
   }
 
@@ -480,7 +637,17 @@ async function handleLiveQueue(ctx, lang, queryText) {
       `  Queue: *${qSt}* | Payment: *${paySt}*\n\n`;
   });
 
-  await ctx.sendText(out.trim());
+  await sendButtonsMessage(ctx, {
+    headerText: lang === "en" ? "Live Queue" : "लाइव कतार",
+    bodyText: out.trim(),
+    buttons: [
+      { id: "book_opd", title: "Book OPD" },
+      {
+        id: "back_menu",
+        title: lang === "en" ? "Main Menu" : "मुख्य मेनू",
+      },
+    ],
+  });
 }
 
 async function handleMessage(ctx, rawText = "", btnId = "") {
@@ -491,7 +658,12 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   const text = String(rawText || "").trim();
   const id = String(btnId || "").trim();
 
-  if (text === "0" || text.toLowerCase() === "menu" || text === "मेनू") {
+  if (
+    id === "back_menu" ||
+    text === "0" ||
+    text.toLowerCase() === "menu" ||
+    text === "मेनू"
+  ) {
     ctx.setSession({ lang, step: null, data: {} });
     await sendMainMenu(ctx, lang);
     return;
@@ -542,13 +714,14 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   }
 
   if (step === "LIVE_QUEUE_QUERY") {
-    await handleLiveQueue(ctx, lang, text);
+    const queryVal = id === "track_all" ? "ALL" : text;
+    await handleLiveQueue(ctx, lang, queryVal);
     ctx.setSession({ lang, step: null, data: {} });
     return;
   }
 
   if (!step) {
-    if (text === "1" || id === "book_opd") {
+    if (id === "book_opd") {
       const doctors = await loadDoctors(ctx);
       ctx.setSession({
         lang,
@@ -559,23 +732,26 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       return;
     }
 
-    if (text === "2" || id === "live_queue") {
+    if (id === "live_queue") {
       ctx.setSession({ lang, step: "LIVE_QUEUE_QUERY", data: {} });
-      await ctx.sendText(
-        lang === "en"
-          ? "🔍 Enter *Token ID* (e.g. OPD-123456) or type *ALL*:"
-          : "🔍 *टोकन ID* (जैसे OPD-123456) लिखें या *ALL* भेजें:"
-      );
+      await sendButtonsMessage(ctx, {
+        headerText: lang === "en" ? "Track Token" : "टोकन ट्रैक करें",
+        bodyText:
+          lang === "en"
+            ? "🔍 Tap *My Tokens* below or enter your *Token ID* (e.g. OPD-123456):"
+            : "🔍 नीचे *My Tokens* दबाएं या अपनी *टोकन ID* (जैसे OPD-123456) लिखें:",
+        buttons: [{ id: "track_all", title: "My Tokens" }],
+      });
       return;
     }
 
-    if (text === "3" || id === "doctor_avail") {
+    if (id === "doctor_avail") {
       const doctors = await loadDoctors(ctx);
       await sendDoctorAvailability(ctx, lang, doctors);
       return;
     }
 
-    if (text === "4" || id === "change_lang") {
+    if (id === "change_lang") {
       ctx.setSession({ lang, step: "SELECT_LANG", data: {} });
       await sendWelcomeAndLanguage(ctx);
       return;
@@ -586,8 +762,17 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   }
 
   if (step === "SELECT_DOCTOR") {
-    const doctors = Array.isArray(data.doctors) ? data.doctors : await loadDoctors(ctx);
-    const idx = Number(text) - 1;
+    const doctors = Array.isArray(data.doctors)
+      ? data.doctors
+      : await loadDoctors(ctx);
+
+    let idx = -1;
+    if (id.startsWith("doc_")) {
+      idx = Number(id.replace("doc_", ""));
+    } else if (/^\d+$/.test(text)) {
+      idx = Number(text) - 1;
+    }
+
     if (Number.isNaN(idx) || idx < 0 || idx >= doctors.length) {
       await sendDoctorList(ctx, lang, doctors);
       return;
@@ -605,8 +790,14 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
 
   if (step === "SELECT_DAY") {
     const days = getDayOptions(lang);
-    const idx = Number(text) - 1;
     const doc = data.selectedDoctor;
+
+    let idx = -1;
+    if (id.startsWith("day_")) {
+      idx = Number(id.replace("day_", ""));
+    } else if (/^\d+$/.test(text)) {
+      idx = Number(text) - 1;
+    }
 
     if (Number.isNaN(idx) || idx < 0 || idx >= days.length) {
       await sendDayList(ctx, lang, doc);
@@ -641,7 +832,14 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
 
   if (step === "SELECT_BATCH") {
     const batches = Array.isArray(data.batches) ? data.batches : [];
-    const idx = Number(text) - 1;
+
+    let idx = -1;
+    if (id.startsWith("batch_")) {
+      idx = Number(id.replace("batch_", ""));
+    } else if (/^\d+$/.test(text)) {
+      idx = Number(text) - 1;
+    }
+
     if (Number.isNaN(idx) || idx < 0 || idx >= batches.length) {
       await sendBatchList(ctx, lang, data.selectedDoctor, data.dayInfo, batches);
       return;
@@ -653,7 +851,9 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       data: { ...data, batchSlot: batches[idx] },
     });
     await ctx.sendText(
-      lang === "en" ? "👤 Enter *Patient Full Name*:" : "👤 *मरीज़ का पूरा नाम* लिखें:"
+      lang === "en"
+        ? "👤 Enter *Patient Full Name*:"
+        : "👤 *मरीज़ का पूरा नाम* लिखें:"
     );
     return;
   }
@@ -661,7 +861,9 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
   if (step === "ENTER_NAME") {
     if (text.length < 2) {
       await ctx.sendText(
-        lang === "en" ? "⚠️ Please enter a valid name." : "⚠️ कृपया सही नाम लिखें।"
+        lang === "en"
+          ? "⚠️ Please enter a valid name."
+          : "⚠️ कृपया सही नाम लिखें।"
       );
       return;
     }
@@ -671,7 +873,9 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       data: { ...data, patientName: text },
     });
     await ctx.sendText(
-      lang === "en" ? "🎂 Enter *Patient Age* (in years):" : "🎂 *मरीज़ की उम्र* (साल में) लिखें:"
+      lang === "en"
+        ? "🎂 Enter *Patient Age* (in years):"
+        : "🎂 *मरीज़ की उम्र* (साल में) लिखें:"
     );
     return;
   }
@@ -680,7 +884,9 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
     const age = Number(text.replace(/\D/g, ""));
     if (!age || age < 1 || age > 120) {
       await ctx.sendText(
-        lang === "en" ? "⚠️ Enter a valid age (1–120)." : "⚠️ कृपया सही उम्र (1 से 120 के बीच) लिखें।"
+        lang === "en"
+          ? "⚠️ Enter a valid age (1–120)."
+          : "⚠️ कृपया सही उम्र (1 से 120 के बीच) लिखें।"
       );
       return;
     }
@@ -689,26 +895,21 @@ async function handleMessage(ctx, rawText = "", btnId = "") {
       step: "ENTER_PHONE",
       data: { ...data, patientAge: age },
     });
-    await ctx.sendText(
-      lang === "en"
-        ? "📱 Enter *10-digit Mobile Number* (or reply *SAME* to use this WhatsApp number):"
-        : "📱 *10 अंकों का मोबाइल नंबर* लिखें (या इसी WhatsApp नंबर के लिए *SAME* लिखें):"
-    );
+    await sendMobilePrompt(ctx, lang);
     return;
   }
 
   if (step === "ENTER_PHONE") {
-    const useSame = text.toUpperCase() === "SAME" || text === "यही";
+    const useSame =
+      id === "use_same_phone" ||
+      text.toUpperCase() === "SAME" ||
+      text === "यही";
     const digits = useSame
       ? String(ctx.from || "").replace(/\D/g, "").slice(-10)
       : text.replace(/\D/g, "").slice(-10);
 
     if (digits.length !== 10) {
-      await ctx.sendText(
-        lang === "en"
-          ? "⚠️ Please enter a valid 10-digit mobile number or type *SAME*."
-          : "⚠️ कृपया 10 अंकों का सही मोबाइल नंबर लिखें या *SAME* भेजें।"
-      );
+      await sendMobilePrompt(ctx, lang);
       return;
     }
 
