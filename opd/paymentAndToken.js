@@ -137,6 +137,41 @@ async function verifyPaymentFromCashfreeOrCtx(ctx, data, orderId) {
   return { status: "PENDING" };
 }
 
+function buildConfirmedTokenMessage(
+  { tokenId, patientName, patientAge, patientPhone, doctorName, visitDate, batchSlot, opdFee, payableAmount },
+  lang = "hi"
+) {
+  const feeNum = toNumberClean(opdFee, 0);
+  const paidNum = toNumberClean(payableAmount, feeNum);
+  const balNum = Math.max(0, feeNum - paidNum);
+
+  if (lang === "en") {
+    return (
+      `✅ *Payment Received — OPD Token Confirmed*\n\n` +
+      `• Token No.: *${tokenId}*\n` +
+      `• Patient: *${patientName}*${patientAge ? ` (${patientAge} yrs)` : ""}\n` +
+      `• Mobile: *${patientPhone}*\n` +
+      `• Doctor: *${doctorName}*\n` +
+      `• Date: *${visitDate}* | *${batchSlot}*\n` +
+      `• Paid Online: *₹${paidNum}*${feeNum > 0 ? ` (OPD Fee: ₹${feeNum})` : ""}` +
+      (balNum > 0 ? `\n• Balance at Counter (Cash): *₹${balNum}*` : "") +
+      `\n• Status: *Paid*`
+    );
+  }
+
+  return (
+    `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n` +
+    `• टोकन नंबर: *${tokenId}*\n` +
+    `• मरीज़: *${patientName}*${patientAge ? ` (${patientAge} वर्ष)` : ""}\n` +
+    `• मोबाइल: *${patientPhone}*\n` +
+    `• डॉक्टर: *${doctorName}*\n` +
+    `• तारीख: *${visitDate}* | *${batchSlot}*\n` +
+    `• ऑनलाइन भुगतान: *₹${paidNum}*${feeNum > 0 ? ` (OPD फ़ीस: ₹${feeNum})` : ""}` +
+    (balNum > 0 ? `\n• काउंटर पर शेष राशि (नकद): *₹${balNum}*` : "") +
+    `\n• स्टेटस: *Paid*`
+  );
+}
+
 async function sendPaymentActionButtons(ctx, promptText, lang = "hi") {
   if (typeof ctx.sendWA === "function") {
     const waRes = await ctx.sendWA({
@@ -342,9 +377,20 @@ async function initiatePaymentOrBooking(ctx, data, tenDigit, lang = "hi") {
     });
     ctx.clearSession(true);
     await ctx.sendText(
-      lang === "en"
-        ? `✅ *OPD Token Booked*\n• Token: *${tokenId}*\n• Patient: *${cleanName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
-        : `✅ *OPD टोकन बुक हो गया*\n• टोकन: *${tokenId}*\n• मरीज़: *${cleanName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
+      buildConfirmedTokenMessage(
+        {
+          tokenId,
+          patientName: cleanName,
+          patientAge: cleanAge,
+          patientPhone: cleanPhone,
+          doctorName: doc.name || "",
+          visitDate: data.visitDate || "",
+          batchSlot: data.batchSlot || "",
+          opdFee,
+          payableAmount,
+        },
+        lang
+      )
     );
     return;
   }
@@ -382,39 +428,71 @@ async function handleAwaitPaymentStep(
 
   const statusRes = await verifyPaymentFromCashfreeOrCtx(ctx, data, orderId);
   if (statusRes?.status === "PAID") {
+    const doc = data.selectedDoctor || {};
+    const cleanPhone = normalizeTenDigitPhone(data.patientPhone);
+    const feeVal = toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0);
+    const paidVal = toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0);
+
     if (typeof ctx.confirmPendingBookingByOrderId === "function") {
       const issued = await ctx.confirmPendingBookingByOrderId(
         orderId,
         statusRes.cf_payment_id || orderId
       );
       if (issued?.ok && issued?.tokenId) {
+        ctx.clearSession(true);
+        await ctx.sendText(
+          buildConfirmedTokenMessage(
+            {
+              tokenId: issued.tokenId,
+              patientName: data.patientName || "Patient",
+              patientAge: data.patientAge || "",
+              patientPhone: cleanPhone,
+              doctorName: doc.name || "",
+              visitDate: data.visitDate || "",
+              batchSlot: data.batchSlot || "",
+              opdFee: feeVal,
+              payableAmount: paidVal,
+            },
+            lang
+          )
+        );
         return;
       }
     }
 
     if (typeof ctx.recordPaidBookingAndLog === "function") {
       const tokenId = `OPD_${Date.now().toString().slice(-4)}`;
-      const doc = data.selectedDoctor || {};
       await ctx.recordPaidBookingAndLog({
         tokenId,
         patientName: data.patientName || "Patient",
         patientAge: data.patientAge || "",
-        patientPhone: normalizeTenDigitPhone(data.patientPhone),
+        patientPhone: cleanPhone,
         doctorId: doc.id || "",
         doctorName: doc.name || "",
         visitDate: data.visitDate || "",
         batchSlot: data.batchSlot || "",
-        opdFee: toNumberClean(doc.opdFee ?? data.opdFee ?? 0, 0),
-        advanceFee: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
-        paidAmount: toNumberClean(data.payableAmount ?? data.opdFee ?? 0, 0),
+        opdFee: feeVal,
+        advanceFee: paidVal,
+        paidAmount: paidVal,
         paymentLinkId: orderId,
         paymentRefId: statusRes.cf_payment_id || orderId,
       });
       ctx.clearSession(true);
       await ctx.sendText(
-        lang === "en"
-          ? `✅ *Payment Received — OPD Token Confirmed*\n\n• Token No.: *${tokenId}*\n• Patient: *${data.patientName}*\n• Doctor: *${doc.name}*\n• Date: *${data.visitDate}* (${data.batchSlot})`
-          : `✅ *पेमेंट प्राप्त — OPD टोकन कन्फ़र्म*\n\n• टोकन नंबर: *${tokenId}*\n• मरीज़: *${data.patientName}*\n• डॉक्टर: *${doc.name}*\n• तारीख: *${data.visitDate}* (${data.batchSlot})`
+        buildConfirmedTokenMessage(
+          {
+            tokenId,
+            patientName: data.patientName || "Patient",
+            patientAge: data.patientAge || "",
+            patientPhone: cleanPhone,
+            doctorName: doc.name || "",
+            visitDate: data.visitDate || "",
+            batchSlot: data.batchSlot || "",
+            opdFee: feeVal,
+            payableAmount: paidVal,
+          },
+          lang
+        )
       );
       return;
     }
