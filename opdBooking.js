@@ -568,6 +568,15 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
     data: pendingPayload,
   });
 
+  if (typeof ctx.registerPendingPayment === "function") {
+    ctx.registerPendingPayment(paymentOrderId, {
+      ...pendingPayload,
+      lang,
+      businessName: bizName,
+      sheetId: getClientSheetId(ctx),
+    });
+  }
+
   const dayText = dayLabel ? `${dayLabel} (${visitDate})` : visitDate;
 
   let msg =
@@ -616,8 +625,6 @@ async function initiatePaymentBeforeToken(ctx, lang, sessionData) {
 
 async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
   const spreadsheetId = getClientSheetId(ctx);
-  const tokenId = await generateNextOpdToken(ctx, spreadsheetId);
-
   const doc = pendingData.selectedDoctor || {};
   const opdFee = Number(doc.opdFee ?? pendingData.opdFee ?? 0);
   const payableAmount = Number(pendingData.payableAmount ?? opdFee);
@@ -630,27 +637,32 @@ async function issueConfirmedTokenAfterPayment(ctx, lang, pendingData) {
   const bizName = ctx.business?.name || "City Care OPD";
   const paymentOrderId = pendingData.paymentOrderId || "";
 
-  await ctx.postSheet({
-    action: "create_booking",
-    spreadsheetId,
-    spreadsheet_id: spreadsheetId,
-    tokenId,
-    patientName,
-    patientAge,
-    patientPhone,
-    doctorId: doc.id || "",
-    doctorName: doc.name || "",
-    visitDate,
-    batchSlot,
-    opdFee,
-    advanceFee: payableAmount,
-    paidAmount: payableAmount,
-    queueStatus: "Waiting",
-    paymentStatus: "Paid",
-    greetingSent: "Yes",
-    paymentLinkId: paymentOrderId,
-    paymentRefId: paymentOrderId,
-  });
+  let tokenId = pendingData.confirmedTokenId || "";
+
+  if (!tokenId) {
+    tokenId = await generateNextOpdToken(ctx, spreadsheetId);
+    await ctx.postSheet({
+      action: "create_booking",
+      spreadsheetId,
+      spreadsheet_id: spreadsheetId,
+      tokenId,
+      patientName,
+      patientAge,
+      patientPhone,
+      doctorId: doc.id || "",
+      doctorName: doc.name || "",
+      visitDate,
+      batchSlot,
+      opdFee,
+      advanceFee: payableAmount,
+      paidAmount: payableAmount,
+      queueStatus: "Waiting",
+      paymentStatus: "Paid",
+      greetingSent: "Yes",
+      paymentLinkId: paymentOrderId,
+      paymentRefId: paymentOrderId,
+    });
+  }
 
   ctx.clearSession(true);
 
